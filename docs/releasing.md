@@ -4,7 +4,7 @@ Changesets records user-visible changes and prepares version and changelog commi
 
 ## One-time setup
 
-The package must be public (`private: false`), have a version, and set `repository.url` in `package.json` to this repository before publishing. Check the tarball with `npm pack --dry-run` and verify the package name is available on npm.
+The package must be public (`private: false`), have a version, and set `repository.url` in `package.json` to this repository before publishing. The installed CLI supports Node.js 22 or newer without Bun. Check the tarball with `npm pack --dry-run`, install it in a clean Node-only project to run `effect-inspect start`, and verify the package name is available on npm.
 
 An npm package must already exist before its trusted publisher can be configured. A maintainer must bootstrap the first release locally with npm login and 2FA:
 

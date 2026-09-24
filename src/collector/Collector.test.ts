@@ -8,11 +8,15 @@
  */
 import { describe, expect, it } from 'bun:test'
 import { Effect, Scope } from 'effect'
+import * as NodeHttpServer from '@effect/platform-node/NodeHttpServer'
+// Exercise the same native server constructor used by the installed CLI.
+// oxlint-disable-next-line effecttsgo/node-builtin-import
+import { createServer } from 'node:http'
+import { HttpServer } from 'effect/unstable/http'
 import { clientCodec, webappCodec, webappRequestCodec } from '../protocol/Codec.ts'
 import type * as Protocol from '../protocol/Schema.ts'
 import { protocolVersion } from '../protocol/Schema.ts'
-import { make as makeSocketServer } from './BunWebSocketServer.ts'
-import { handleConnection, webappPath } from './Server.ts'
+import { run, webappPath } from './Server.ts'
 import { make as makeStore, Store } from './Store.ts'
 
 const clock = { startTime: 1_000n, wallClockEpochMillis: 1_700_000_000_000 }
@@ -54,8 +58,13 @@ interface Collector {
 /** Starts a collector on an ephemeral port, stopped when the scope closes. */
 const startCollector = Effect.fnUntraced(function* (options?: { readonly capacity?: number }) {
   const store = yield* makeStore(options)
-  const server = yield* makeSocketServer({ port: 0 })
-  yield* Effect.forkScoped(Effect.provideService(server.run(handleConnection), Store, store))
+  const server = yield* NodeHttpServer.make(createServer, { port: 0 })
+  yield* Effect.forkScoped(
+    run().pipe(
+      Effect.provideService(Store, store),
+      Effect.provideService(HttpServer.HttpServer, server),
+    ),
+  )
   return {
     port: server.address._tag === 'UnixPathAddress' ? 0 : server.address.port,
     store,

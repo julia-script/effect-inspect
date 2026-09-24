@@ -13,24 +13,24 @@ drop every trace it was holding. Save the ones you want to keep — see
 
 ## Quickstart
 
-Install the package in an Effect project. The `effect-inspect` command requires
-Bun; the library import also works in a JavaScript runtime with a global
-`WebSocket` implementation.
+Install the package in an Effect project. The `effect-inspect` command runs on
+Node.js 22 or newer and does not require Bun. The library import works in a
+JavaScript runtime with a global `WebSocket` implementation.
 
 ```bash
-bun add effect-inspect effect
+npm install effect-inspect effect
 ```
 
 Start the collector and bundled webapp, then open the URL it prints:
 
 ```bash
-bunx effect-inspect start
+npx effect-inspect start
 # effect-inspect listening at http://localhost:34437
 ```
 
 Run your instrumented program in another terminal. The collector listens for
-programs at `ws://localhost:34437/`. Run `bunx effect-inspect --help` for
-command help or `bunx effect-inspect start --help` for start options.
+programs at `ws://localhost:34437/`. Run `npx effect-inspect --help` for
+command help or `npx effect-inspect start --help` for start options.
 
 When working from this repository, install its dependencies with `bun install`
 and run an example:
@@ -107,7 +107,7 @@ this while demoing.
 The collector serves both roles on one port, routed by path: programs dial
 `ws://localhost:34437/`, the webapp `ws://localhost:34437/webapp`.
 
-The installed command uses Bun for its WebSocket server and bundled UI. The
+The installed command uses Node.js for its WebSocket server and bundled UI. The
 library's `Inspect.layer()` uses the runtime's global `WebSocket`; use
 `Inspect.layerWebSocket()` with a supplied Effect WebSocket constructor when
 that global is unavailable.
