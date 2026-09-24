@@ -26,8 +26,11 @@ import { TraceStore } from '../trace/TraceStore.ts'
  * request path, and anything that is not `/webapp` is treated as an
  * instrumented program — which would get no `SessionList` at all. See
  * `webappPath` in `src/collector/Server.ts`.
+ *
+ * `VITE_COLLECTOR_URL` overrides it, so a second collector on a non-default
+ * `EFFECT_INSPECT_PORT` can be inspected without editing source.
  */
-export const COLLECTOR_URL = 'ws://localhost:34437/webapp'
+export const COLLECTOR_URL = import.meta.env.VITE_COLLECTOR_URL ?? 'ws://localhost:34437/webapp'
 
 /** Connection lifecycle, as rendered in the header. */
 export type ConnectionStatus =
@@ -72,6 +75,26 @@ export const selectedSessionAtom = Atom.readable((get): Session | undefined => {
   const id = get(selectedSessionIdAtom)
   if (id === undefined) return undefined
   return get(sessionsAtom).find((session) => session.sessionId === id)
+})
+
+/**
+ * Wall-clock epoch millis corresponding to `traceStore.origin`.
+ *
+ * `TraceStore.epochOrigin` is permanently `undefined` in practice: the
+ * collector does not append `Hello` to the session ring, so the store's `Hello`
+ * case never fires. The anchor is plumbed from the `Session` record instead,
+ * which carries the same `clock` and is already in hand — appending `Hello`
+ * would change the collector's retention semantics for one timestamp.
+ *
+ * The store's origin is the first *observed* event, not the session start, so
+ * the session clock has to be shifted by the gap between them.
+ */
+export const wallClockOriginAtom = Atom.readable((get): number | undefined => {
+  get(traceVersionAtom)
+  const session = get(selectedSessionAtom)
+  if (session === undefined || traceStore.origin === undefined) return undefined
+  const offsetNanos = traceStore.origin - session.clock.startTime
+  return session.clock.wallClockEpochMillis + Number(offsetNanos / 1_000_000n)
 })
 
 /** Live counters for the header, recomputed only when the sampled version changes. */

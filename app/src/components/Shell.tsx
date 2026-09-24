@@ -8,6 +8,9 @@
  */
 import { useAtom, useAtomMount, useAtomValue } from '@effect/atom-react'
 import type { Session } from '../../../src/protocol/Schema.ts'
+import { Drawer } from './Drawer.tsx'
+import { FlameChart } from './FlameChart.tsx'
+import { SpanDetail } from './SpanDetail.tsx'
 import {
   COLLECTOR_URL,
   connectionAtom,
@@ -17,6 +20,7 @@ import {
   selectedSessionIdAtom,
   sessionsAtom,
   traceStatsAtom,
+  wallClockOriginAtom,
 } from '../state/atoms.ts'
 
 const formatTime = (epochMillis: number): string =>
@@ -56,8 +60,13 @@ const Stat = ({ label, value }: { readonly label: string; readonly value: string
 
 const Stats = () => {
   const stats = useAtomValue(traceStatsAtom)
+  // The trace's absolute start. `TraceStore.epochOrigin` is never set (the
+  // collector does not retain `Hello`), so this comes from the session clock
+  // via `wallClockOriginAtom` — see that atom for why.
+  const wallClock = useAtomValue(wallClockOriginAtom)
   return (
     <div className="flex items-center gap-4 text-xs">
+      {wallClock !== undefined && <Stat label="t0" value={formatTime(wallClock)} />}
       <Stat label="spans" value={String(stats.spans)} />
       <Stat label="open" value={String(stats.openSpans)} />
       <Stat label="logs" value={String(stats.logs)} />
@@ -151,14 +160,8 @@ const Offline = () => (
   </div>
 )
 
-/**
- * Placeholder for the canvas flame chart, which is a separate task.
- *
- * It will mount a `<canvas>` here and read `traceStore` directly in its draw
- * loop — this component deliberately does not thread span data down as props.
- */
-const ChartPlaceholder = () => {
-  const stats = useAtomValue(traceStatsAtom)
+/** The chart, drawer and detail panel, once a session is selected. */
+const Workspace = () => {
   const session = useAtomValue(selectedSessionAtom)
 
   if (session === undefined) {
@@ -170,12 +173,12 @@ const ChartPlaceholder = () => {
   }
 
   return (
-    <div className="flex flex-1 items-center justify-center border-t border-neutral-900">
-      <p className="text-xs text-neutral-700">
-        {stats.spans === 0
-          ? 'Waiting for spans…'
-          : `${stats.spans} spans ingested — flame chart lands in the next task.`}
-      </p>
+    <div className="flex min-h-0 flex-1">
+      <div className="flex min-w-0 flex-1 flex-col border-t border-neutral-900">
+        <FlameChart />
+        <Drawer />
+      </div>
+      <SpanDetail />
     </div>
   )
 }
@@ -207,7 +210,7 @@ export const Shell = () => {
       <div className="flex min-h-0 flex-1">
         <Sessions />
         <main className="flex min-w-0 flex-1 flex-col">
-          {status._tag === 'Disconnected' ? <Offline /> : <ChartPlaceholder />}
+          {status._tag === 'Disconnected' ? <Offline /> : <Workspace />}
         </main>
       </div>
     </div>
