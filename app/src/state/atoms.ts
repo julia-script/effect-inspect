@@ -19,8 +19,15 @@ import { webappCodec, webappRequestCodec } from '../../../src/protocol/Codec.ts'
 import type { Session, WebappMessage } from '../../../src/protocol/Schema.ts'
 import { TraceStore } from '../trace/TraceStore.ts'
 
-/** Where the collector listens. Matches the default in the spec. */
-export const COLLECTOR_URL = 'ws://localhost:34437'
+/**
+ * Where the collector listens.
+ *
+ * The `/webapp` path matters: the collector routes both roles on one port by
+ * request path, and anything that is not `/webapp` is treated as an
+ * instrumented program — which would get no `SessionList` at all. See
+ * `webappPath` in `src/collector/Server.ts`.
+ */
+export const COLLECTOR_URL = 'ws://localhost:34437/webapp'
 
 /** Connection lifecycle, as rendered in the header. */
 export type ConnectionStatus =
