@@ -62,7 +62,10 @@ const asWebSocketLike = (ws: BunSocket): Socket.WebSocketLike => ({
  * Connections that arrive before `run` is called are held open and handed to
  * the handler once it is installed, matching `NodeSocketServer`'s behaviour.
  */
-export const make = Effect.fnUntraced(function* (options: { readonly port: number }) {
+export const make = Effect.fnUntraced(function* (options: {
+  readonly port: number
+  readonly fetch?: (request: Request) => Response | Promise<Response>
+}) {
   const pending: Array<BunSocket> = []
   let onConnection = (ws: BunSocket): void => {
     pending.push(ws)
@@ -72,10 +75,17 @@ export const make = Effect.fnUntraced(function* (options: { readonly port: numbe
     Effect.sync(() =>
       Bun.serve<ConnectionData, never>({
         port: options.port,
-        fetch: (request, server) =>
-          server.upgrade(request, { data: { request, listeners: new Map() } })
-            ? undefined
-            : new Response('effect-inspect collector: websocket only', { status: 426 }),
+        fetch: (request, server) => {
+          if (request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+            return server.upgrade(request, { data: { request, listeners: new Map() } })
+              ? undefined
+              : new Response('WebSocket upgrade failed', { status: 400 })
+          }
+          return (
+            options.fetch?.(request) ??
+            new Response('effect-inspect collector: websocket only', { status: 426 })
+          )
+        },
         websocket: {
           open: (ws) => onConnection(ws),
           message: (ws, message) => emit(ws, 'message', { data: message }),
@@ -120,5 +130,7 @@ export const make = Effect.fnUntraced(function* (options: { readonly port: numbe
 })
 
 /** Provides a WebSocket `SocketServer` bound to `port`. */
-export const layer = (options: { readonly port: number }): Layer.Layer<SocketServer.SocketServer> =>
-  Layer.effect(SocketServer.SocketServer)(make(options))
+export const layer = (options: {
+  readonly port: number
+  readonly fetch?: (request: Request) => Response | Promise<Response>
+}): Layer.Layer<SocketServer.SocketServer> => Layer.effect(SocketServer.SocketServer)(make(options))

@@ -1,15 +1,30 @@
 {
   "name": "effect-inspect",
-  "private": true,
+  "version": "0.1.0",
+  "private": false,
+  "description": "A live inspector for Effect programs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/julia-script/effect-inspect.git"
+  },
+  "bin": {
+    "effect-inspect": "./dist/cli.js"
+  },
   "files": [
-    "dist"
+    "dist",
+    "app/dist"
   ],
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "lint": "oxlint --disable-nested-config .",
@@ -19,7 +34,7 @@
     "test": "bun test src app",
     "check:write": "oxfmt --write . && oxlint --disable-nested-config --fix .",
     "prepare": "effect-tsgo patch --oxlint",
-    "build": "tsc",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && bun run build:app",
     "dev": "tsc --watch --preserveWatchOutput",
     "typecheck": "tsc --noEmit && tsc --noEmit -p app/tsconfig.json && tsc --noEmit -p examples/tsconfig.json",
     "dev:app": "vite dev --config app/vite.config.ts",
@@ -43,6 +58,7 @@
     "scheduler": "0.27.0"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.29.8",
     "@effect/tsgo": "0.45.0",
     "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "1.4.2",
