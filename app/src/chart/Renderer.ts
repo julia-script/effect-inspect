@@ -22,6 +22,8 @@ import {
   memoryCollapsedAtom,
   selectedSpanIdAtom,
 } from './selection.ts'
+import { type Palette, readPalette } from './palette.ts'
+import { resolvedThemeAtom } from '../state/theme.ts'
 import { clamp, isFull, pan, type Viewport, zoom } from './Viewport.ts'
 import {
   drawMemoryTrack,
@@ -41,24 +43,6 @@ const ROW_HEIGHT = 16
 const BAR_GAP = 1
 /** Bars narrower than this are drawn but never labelled — the text would not fit. */
 const MIN_LABEL_WIDTH = 26
-
-/** Near-black background, panels a hair lighter. */
-const COLOR_BG = '#0a0a0a'
-const COLOR_PANEL = '#111111'
-const COLOR_GRID = '#1c1c1c'
-const COLOR_RULER_TEXT = '#525252'
-const COLOR_LABEL = '#e5e5e5'
-const COLOR_LABEL_DIM = '#737373'
-/** Red is reserved for errors — nothing else in the chart is saturated. */
-const COLOR_ERROR = '#7f1d1d'
-const COLOR_ERROR_HOT = '#b91c1c'
-const COLOR_SELECTED = '#fafafa'
-
-/**
- * Bar fill by depth: brightness carries nesting weight, as the visual
- * direction asks, and the cycle is short so a deep trace stays legible.
- */
-const DEPTH_FILL = ['#3f3f46', '#52525b', '#34343a', '#45454d', '#2e2e33']
 
 /** Where a pointer landed, in chart coordinates. */
 interface Hit {
@@ -82,6 +66,14 @@ export class FlameRenderer {
   private frame: number | undefined
   private dirty = true
   private lastVersion = -1
+  /**
+   * The current theme's colours.
+   *
+   * Refreshed on a theme change, not per frame: resolving a dozen custom
+   * properties through `getComputedStyle` forces a style recalculation, which
+   * at 60fps would cost more than drawing the bars.
+   */
+  private palette: Palette = readPalette()
   private hover: Hit | undefined
   /** Last pointer x while the cursor is over the canvas — the keyboard zoom anchor. */
   private cursorX: number | undefined
@@ -117,6 +109,14 @@ export class FlameRenderer {
       registry.subscribe(filterAtom, repaint),
       registry.subscribe(filterHidesAtom, repaint),
       registry.subscribe(memoryCollapsedAtom, repaint),
+      // Theme changes arrive on the same path as a selection change: re-read
+      // the tokens, mark dirty, let the existing loop repaint. The chart never
+      // learns about themes from React, so a flip costs one style resolution
+      // and one frame.
+      registry.subscribe(resolvedThemeAtom, () => {
+        this.palette = readPalette()
+        this.invalidate()
+      }),
     )
 
     this.loop()
@@ -455,10 +455,16 @@ export class FlameRenderer {
 
   // ----------------------------------------------------------------- drawing
 
+  /** The bar fill for a nesting depth, cycling through the theme's ramp. */
+  private depthFill(depth: number): string {
+    const ramp = this.palette.depth
+    return ramp[depth % ramp.length] ?? this.palette.labelDim
+  }
+
   private draw(): void {
     const ctx = this.ctx
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0)
-    ctx.fillStyle = COLOR_BG
+    ctx.fillStyle = this.palette.bg
     ctx.fillRect(0, 0, this.width, this.height)
     ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace'
     ctx.textBaseline = 'middle'
@@ -477,7 +483,7 @@ export class FlameRenderer {
   private drawOverview(filter: string): void {
     const ctx = this.ctx
     const total = this.total()
-    ctx.fillStyle = COLOR_PANEL
+    ctx.fillStyle = this.palette.panel
     ctx.fillRect(0, 0, this.width, OVERVIEW_HEIGHT)
 
     // A miniature of the trace: every row squashed into the strip's height, so
@@ -494,7 +500,7 @@ export class FlameRenderer {
           const x0 = (span.start / total) * this.width
           const x1 = (spanEnd(span, total) / total) * this.width
           if (filter !== '' && !matches(span.name, filter)) continue
-          ctx.fillStyle = DEPTH_FILL[span.depth % DEPTH_FILL.length]!
+          ctx.fillStyle = this.depthFill(span.depth)
           ctx.fillRect(x0, y, Math.max(x1 - x0, 0.5), Math.max(rowHeight - 0.5, 0.5))
         }
       }
@@ -502,10 +508,10 @@ export class FlameRenderer {
 
     const left = (this.view.from / total) * this.width
     const right = (this.view.to / total) * this.width
-    ctx.fillStyle = 'rgba(10,10,10,0.72)'
+    ctx.fillStyle = this.palette.overviewScrim
     ctx.fillRect(0, 0, left, OVERVIEW_HEIGHT)
     ctx.fillRect(right, 0, this.width - right, OVERVIEW_HEIGHT)
-    ctx.strokeStyle = '#525252'
+    ctx.strokeStyle = this.palette.overviewWindow
     ctx.lineWidth = 1
     ctx.strokeRect(left + 0.5, 0.5, Math.max(right - left - 1, 1), OVERVIEW_HEIGHT - 1)
   }
@@ -514,17 +520,17 @@ export class FlameRenderer {
   private drawRuler(): Array<number> {
     const ctx = this.ctx
     const y = OVERVIEW_HEIGHT
-    ctx.fillStyle = COLOR_BG
+    ctx.fillStyle = this.palette.bg
     ctx.fillRect(0, y, this.width, RULER_HEIGHT)
 
     const ticks = tickTimes(this.view.from, this.view.to, this.width)
-    ctx.fillStyle = COLOR_RULER_TEXT
+    ctx.fillStyle = this.palette.rulerText
     ctx.textAlign = 'left'
     for (const time of ticks) {
       const x = this.timeToX(time)
       ctx.fillText(formatTick(time, ticks), x + 3, y + RULER_HEIGHT / 2)
     }
-    ctx.strokeStyle = COLOR_GRID
+    ctx.strokeStyle = this.palette.grid
     ctx.beginPath()
     ctx.moveTo(0, y + RULER_HEIGHT - 0.5)
     ctx.lineTo(this.width, y + RULER_HEIGHT - 0.5)
@@ -562,6 +568,7 @@ export class FlameRenderer {
       rssPeak: traceStore.memoryRssPeak,
       traceEnd: this.total(),
       cursorTime,
+      palette: this.palette,
     })
 
     // Readout at the cursor: the value at that instant, drawn on the canvas
@@ -573,7 +580,7 @@ export class FlameRenderer {
     const ctx = this.ctx
     ctx.save()
     const x = Math.round(this.timeToX(sample.time)) + 0.5
-    ctx.strokeStyle = '#737373'
+    ctx.strokeStyle = this.palette.memoryLabel
     ctx.beginPath()
     ctx.moveTo(x, top)
     ctx.lineTo(x, top + height)
@@ -585,9 +592,9 @@ export class FlameRenderer {
     // Flip left of the cursor near the right edge, so the readout never runs
     // off the canvas on the last few percent of a trace.
     const labelX = x + 6 + textWidth > this.width ? x - 6 - textWidth : x + 6
-    ctx.fillStyle = 'rgba(10,10,10,0.85)'
+    ctx.fillStyle = this.palette.readoutBg
     ctx.fillRect(labelX - 3, top + height - 16, textWidth + 6, 12)
-    ctx.fillStyle = '#d4d4d4'
+    ctx.fillStyle = this.palette.readoutFg
     ctx.fillText(label, labelX, top + height - 10)
     ctx.restore()
   }
@@ -609,7 +616,7 @@ export class FlameRenderer {
     ctx.clip()
 
     // Faint full-height gridlines, aligned to the ruler's ticks.
-    ctx.strokeStyle = COLOR_GRID
+    ctx.strokeStyle = this.palette.grid
     ctx.beginPath()
     for (const time of ticks) {
       const x = Math.round(this.timeToX(time)) + 0.5
@@ -642,14 +649,14 @@ export class FlameRenderer {
         const hot = span.spanId === hovered
 
         ctx.globalAlpha = matched ? 1 : 0.22
-        if (failed) ctx.fillStyle = hot ? COLOR_ERROR_HOT : COLOR_ERROR
+        if (failed) ctx.fillStyle = hot ? this.palette.errorHot : this.palette.error
         // Brightness carries *nesting* weight, so the fill keys on the span's
         // depth, not on the packed row it happened to land in.
-        else ctx.fillStyle = hot ? COLOR_LABEL_DIM : DEPTH_FILL[span.depth % DEPTH_FILL.length]!
+        else ctx.fillStyle = hot ? this.palette.labelDim : this.depthFill(span.depth)
         ctx.fillRect(x0, y, width, ROW_HEIGHT - BAR_GAP)
 
         if (span.spanId === selected) {
-          ctx.strokeStyle = COLOR_SELECTED
+          ctx.strokeStyle = this.palette.selected
           ctx.lineWidth = 1
           ctx.strokeRect(x0 + 0.5, y + 0.5, Math.max(width - 1, 1), ROW_HEIGHT - BAR_GAP - 1)
         }
@@ -659,7 +666,7 @@ export class FlameRenderer {
           ctx.beginPath()
           ctx.rect(x0, y, width - 3, ROW_HEIGHT - BAR_GAP)
           ctx.clip()
-          ctx.fillStyle = matched ? COLOR_LABEL : COLOR_LABEL_DIM
+          ctx.fillStyle = matched ? this.palette.label : this.palette.labelDim
           ctx.fillText(span.name, x0 + 3, y + (ROW_HEIGHT - BAR_GAP) / 2)
           ctx.restore()
         }

@@ -7,7 +7,7 @@
  */
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
 import { Result } from 'effect'
-import { useContext, useEffect, useRef, useState } from 'react'
+import { type CSSProperties, useContext, useEffect, useRef, useState } from 'react'
 import {
   addLoadedTrace,
   loadedSessionsAtom,
@@ -16,7 +16,32 @@ import {
   traceStatsAtom,
   type Registry,
 } from '../state/atoms.ts'
+import { Button } from './atoms/Button.tsx'
 import { serializeTraceFile, traceFileExtension, traceFileName } from '../trace/TraceFile.ts'
+
+/**
+ * The shared surface for both header notices.
+ *
+ * The error and the truncation warning sit in the same place and say the same
+ * kind of thing — "the file you opened is not what you expected" — so they get
+ * one treatment and differ only by tone, the same red/orange split the stats
+ * row and connection badge use.
+ */
+const NOTICE =
+  'absolute inset-x-0 top-11 z-20 mx-auto flex w-fit max-w-xl items-baseline gap-3 rounded-card bg-surface px-3 py-2 text-xs shadow-overlay'
+
+/**
+ * A notice's tone wash, as a flat `background-image` over {@link NOTICE}'s
+ * opaque `bg-surface`.
+ *
+ * Foundation's `-tint` tokens are *translucent* in dark (`… / 0.14`), so
+ * setting one as the notice's `background-color` lets the toolbar behind it
+ * read straight through. Painting it as a one-stop gradient layers the tone on
+ * top of an opaque surface instead, which is what a floating panel needs.
+ */
+const tintWash = (tone: 'red' | 'orange'): CSSProperties => ({
+  backgroundImage: `linear-gradient(var(--${tone}-tint), var(--${tone}-tint))`,
+})
 
 /** Hands the text to the browser as a download. */
 const download = (name: string, text: string): void => {
@@ -88,24 +113,24 @@ export const TraceFileControls = () => {
 
   return (
     <>
-      <div className="flex items-center gap-3 text-xs">
-        <button
+      <div className="flex items-center gap-1.5">
+        <Button
           type="button"
+          size="xs"
           onClick={save}
           disabled={session === undefined || stats.spans === 0}
           data-testid="save-trace"
-          className="text-neutral-500 transition-colors hover:text-neutral-200 disabled:cursor-not-allowed disabled:text-neutral-700"
         >
           save
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
+          size="xs"
           onClick={() => input.current?.click()}
           data-testid="open-trace"
-          className="text-neutral-500 transition-colors hover:text-neutral-200"
         >
           open
-        </button>
+        </Button>
         <input
           ref={input}
           type="file"
@@ -123,13 +148,14 @@ export const TraceFileControls = () => {
       {error !== undefined && (
         <div
           data-testid="trace-file-error"
-          className="absolute inset-x-0 top-11 z-20 mx-auto w-fit max-w-xl rounded border border-red-900 bg-neutral-950 px-3 py-2 text-xs text-red-300"
+          className={`${NOTICE} text-red`}
+          style={tintWash('red')}
         >
           {error}
           <button
             type="button"
             onClick={() => setError(undefined)}
-            className="ml-3 text-neutral-600 hover:text-neutral-300"
+            className="shrink-0 text-ink-2 transition-colors hover:text-ink"
           >
             dismiss
           </button>
@@ -139,15 +165,16 @@ export const TraceFileControls = () => {
       {truncated !== undefined && error === undefined && (
         <div
           data-testid="trace-file-truncated"
-          className="absolute inset-x-0 top-11 z-20 mx-auto w-fit rounded border border-neutral-800 bg-neutral-950 px-3 py-2 text-xs text-neutral-400"
+          className={`${NOTICE} text-orange`}
+          style={tintWash('orange')}
         >
           This trace file was cut short mid-write; everything before the cut is shown.
         </div>
       )}
 
       {dragging && (
-        <div className="pointer-events-none fixed inset-0 z-30 flex items-center justify-center bg-neutral-950/80">
-          <p className="rounded border border-dashed border-neutral-700 px-6 py-4 text-xs text-neutral-400">
+        <div className="pointer-events-none fixed inset-0 z-30 flex items-center justify-center bg-page/80">
+          <p className="rounded-card border border-dashed border-line-strong bg-surface px-6 py-4 text-xs text-ink-2 shadow-overlay">
             Drop a {traceFileExtension} file to load it
           </p>
         </div>

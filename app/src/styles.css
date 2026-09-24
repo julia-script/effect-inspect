@@ -1,6 +1,162 @@
-@import 'tailwindcss';
+/*
+ * Beautiful UI's `foundation.css` is the single token vocabulary for the app.
+ *
+ * It carries both `:root` (light) and `.dark` token sets, the `@theme inline`
+ * mapping that turns them into Tailwind utilities, `@custom-variant dark`,
+ * layered shadow tokens and the focus-visible ring — so everything the chrome
+ * needs comes from one file, and the canvas reads the same custom properties
+ * off the document element.
+ *
+ * It imports `tailwindcss` and `shadow-plugin/unprefixed` itself, which is why
+ * this file has no `@import 'tailwindcss'` of its own.
+ */
+@import './beautifui/foundation.css';
 
-/* Visual direction: near-black, monospace, grayscale. See the spec. */
+/*
+ * Two overrides of foundation's defaults, and nothing else.
+ *
+ * 1. The app is a full-bleed inspector, not a document: the shell paints every
+ *    pixel, so foundation's diagonal stripe wallpaper is never visible and
+ *    only costs a repeating-gradient repaint on every scroll. `--page` is the
+ *    surface the shell actually sits on.
+ * 2. This is a profiler. Numbers, span names and timings line up in columns,
+ *    so monospace is the body face; foundation's sans stays available as
+ *    `font-sans` for prose-ish chrome labels.
+ */
+body {
+  background-color: var(--page);
+  background-image: none;
+  font-family: var(--font-mono);
+}
+
+@theme inline {
+  --font-mono-face: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono';
+}
+
+/*
+ * The flame chart's depth ramp.
+ *
+ * Foundation has no equivalent — it ships surfaces and an ink ramp, not a
+ * categorical sequence — so this is the one token set designed here rather
+ * than installed. The requirements are specific to a flame chart: five steps
+ * that stay distinguishable from each other *and* from both the chart
+ * background and the bar labels drawn on top of them, in both themes.
+ *
+ * Light: a ramp spanning oklch L 0.70–0.86, all at chroma 0.012 hue 258 so it
+ * sits in foundation's cool-neutral family. It runs *darker* than the
+ * `--canvas` it sits on (0.961) rather than lighter, because on a light
+ * background a bar must be the darker element to read as a bar. Dark: 0.31–0.46,
+ * lighter than `--canvas` (0.231) for the same reason inverted.
+ *
+ * The order is deliberately not monotonic by index. The ramp **cycles**, so
+ * step 5 abuts step 1 as well, and a parent and its child must never look like
+ * the same bar — so every one of the five adjacent pairs, wraparound included,
+ * is separated by a large step rather than a smooth gradient.
+ *
+ * Measured (`bun test app/src/chart/palette.test.ts` asserts these hold):
+ *
+ * | pair                | light | dark |
+ * | ------------------- | ----- | ---- |
+ * | bar vs canvas       | 1.37–2.38 | 1.29–2.36 |
+ * | `--ink` label on bar| 6.06–10.51 | 6.43–11.77 |
+ * | adjacent depths     | 1.27–1.52 | 1.31–1.65 |
+ *
+ * Every label clears WCAG AA on every step in both themes, and no two adjacent
+ * depths fall below 1.25:1, the point at which bars start to merge visually.
+ */
 :root {
-  color-scheme: dark;
+  --depth-1: oklch(0.86 0.012 258);
+  --depth-2: oklch(0.75 0.012 258);
+  --depth-3: oklch(0.82 0.012 258);
+  --depth-4: oklch(0.7 0.012 258);
+  --depth-5: oklch(0.78 0.012 258);
+}
+
+.dark {
+  --depth-1: oklch(0.38 0.012 258);
+  --depth-2: oklch(0.46 0.012 258);
+  --depth-3: oklch(0.34 0.012 258);
+  --depth-4: oklch(0.43 0.012 258);
+  --depth-5: oklch(0.31 0.012 258);
+}
+
+@theme inline {
+  --color-depth-1: var(--depth-1);
+  --color-depth-2: var(--depth-2);
+  --color-depth-3: var(--depth-3);
+  --color-depth-4: var(--depth-4);
+  --color-depth-5: var(--depth-5);
+}
+
+/*
+ * Scrollbars.
+ *
+ * The app has four independently scrolling regions on screen at once, all of
+ * them on `--surface`. A browser-default scrollbar is a different material
+ * from every one of them — an opaque light gutter in the dark theme — so it
+ * reads as an unstyled seam rather than as part of the panel.
+ *
+ * Both syntaxes, deliberately: `scrollbar-width`/`scrollbar-color` is the
+ * standard and is all Firefox understands, but it cannot make the track
+ * transparent or round the thumb, so WebKit gets the fuller treatment. Neither
+ * *hides* the scrollbar — a 10k-row event log needs its scroll position
+ * visible — and both are token-driven, so the theme switch carries them.
+ *
+ * The overlay scrollbars macOS shows by default already look like this and
+ * ignore these rules; this is what a trackpad-less machine (or any mouse user
+ * with "always show scrollbars") gets instead of the default.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--line-strong);
+  /* Inset by a transparent border, so the thumb is a 6px bar in a 10px
+     gutter rather than a slab against the panel edge. */
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--ink-3);
+}
+
+/* The two-axis junction is the only part that is pure chrome; left unpainted
+   it renders as the browser's own grey square. */
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/*
+ * Restore the focus ring on form fields.
+ *
+ * Foundation sets `outline: none` on `input`/`textarea`/`select` — its own
+ * `search` field paints a ring as a `box-shadow` on a wrapper instead, which
+ * this app does not use. The result is that every button in the chrome has a
+ * visible ring and the filter field and checkbox have none: a keyboard user
+ * tabbing across the toolbar loses their place twice.
+ *
+ * This is the global rule re-applied, not a per-component ring — it matches
+ * foundation's own `:focus-visible` declaration exactly, so a field and a
+ * button still look identical when focused, which is the point of the spec's
+ * "components do not add their own" rule.
+ */
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[contenteditable]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
