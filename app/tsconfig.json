@@ -12,7 +12,10 @@
     // how paths are resolved for the check.
     "rootDir": "..",
     "declaration": false,
-    "declarationMap": false
+    "declarationMap": false,
+    "paths": {
+      "@/*": ["./src/*"]
+    }
   },
   "include": ["src", "vite.config.ts", "stub-collector.ts"]
 }
