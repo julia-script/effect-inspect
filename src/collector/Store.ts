@@ -28,12 +28,6 @@ export interface SessionSnapshot {
   readonly skippedLines: number
 }
 
-/** Counters the collector surfaces about data it could not keep or read. */
-export interface Losses {
-  readonly droppedMessages: number
-  readonly skippedLines: number
-}
-
 interface SessionState {
   session: Protocol.Session
   /**
@@ -80,8 +74,6 @@ export class Store extends Context.Service<
     readonly live: (
       sessionId: Protocol.SessionId,
     ) => Effect.Effect<PubSub.PubSub<Protocol.ClientMessage> | undefined>
-    /** Loss counters summed over every session, plus lines with no session. */
-    readonly losses: Effect.Effect<Losses>
     /** Published whenever the session list changes, so clients can re-send it. */
     readonly changes: PubSub.PubSub<void>
   }
@@ -91,8 +83,6 @@ export class Store extends Context.Service<
 export const make = Effect.fnUntraced(function* (options?: { readonly capacity?: number }) {
   const capacity = options?.capacity ?? defaultCapacity
   const sessions = new Map<Protocol.SessionId, SessionState>()
-  /** Skipped lines from a connection that never sent a usable `Hello`. */
-  let orphanSkippedLines = 0
 
   const changes = yield* PubSub.sliding<void>(1)
   const notify = PubSub.publish(changes, undefined).pipe(Effect.asVoid)
@@ -142,11 +132,12 @@ export const make = Effect.fnUntraced(function* (options?: { readonly capacity?:
       return PubSub.publish(state.live, message).pipe(Effect.asVoid)
     })
 
+  // A line from a connection that never sent a usable `Hello` has no session
+  // to count it against, so it is skipped without a counter.
   const skipLine = (sessionId: Protocol.SessionId | undefined) =>
     Effect.sync(() => {
       const state = sessionId === undefined ? undefined : sessions.get(sessionId)
-      if (state === undefined) orphanSkippedLines += 1
-      else state.skippedLines += 1
+      if (state !== undefined) state.skippedLines += 1
     })
 
   const end = (sessionId: Protocol.SessionId) =>
@@ -178,16 +169,6 @@ export const make = Effect.fnUntraced(function* (options?: { readonly capacity?:
 
   const live = (sessionId: Protocol.SessionId) => Effect.sync(() => sessions.get(sessionId)?.live)
 
-  const losses = Effect.sync((): Losses => {
-    let droppedMessages = 0
-    let skippedLines = orphanSkippedLines
-    for (const state of sessions.values()) {
-      droppedMessages += state.droppedMessages
-      skippedLines += state.skippedLines
-    }
-    return { droppedMessages, skippedLines }
-  })
-
   return Store.of({
     hello,
     append,
@@ -196,7 +177,6 @@ export const make = Effect.fnUntraced(function* (options?: { readonly capacity?:
     sessions: Effect.sync(() => Array.from(sessions.values(), (state) => state.session)),
     snapshot,
     live,
-    losses,
     changes,
   })
 })

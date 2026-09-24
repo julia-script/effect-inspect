@@ -204,7 +204,10 @@ describe('collector', () => {
         }
 
         yield* until(
-          Effect.map(collector.store.losses, (losses) => losses.droppedMessages === 2),
+          Effect.map(
+            collector.store.snapshot('session-capped'),
+            (snapshot) => snapshot?.droppedMessages === 2,
+          ),
           'two messages dropped',
         )
 
