@@ -1,0 +1,3 @@
+[test]
+# ponytail: keeps bare `bun test` out of the vendored read-only repos/ tree
+root = "src"

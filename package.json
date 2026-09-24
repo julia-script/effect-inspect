@@ -15,6 +15,7 @@
     "lint": "oxlint --disable-nested-config .",
     "format": "oxfmt --write .",
     "check": "oxfmt --check . && oxlint --disable-nested-config . && bun run typecheck",
+    "test": "bun test src",
     "check:write": "oxfmt --write . && oxlint --disable-nested-config --fix .",
     "prepare": "effect-tsgo patch --oxlint",
     "build": "tsc",
