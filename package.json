@@ -8,7 +8,7 @@
     "url": "git+https://github.com/julia-script/effect-inspect.git"
   },
   "bin": {
-    "effect-inspect": "./dist/cli.js"
+    "effect-inspect": "dist/cli.js"
   },
   "files": [
     "dist",
