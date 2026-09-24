@@ -4,11 +4,18 @@ import {
   clientCodec,
   collectorCodec,
   type Codec,
+  traceFileHeaderCodec,
   webappCodec,
   webappRequestCodec,
 } from './Codec.ts'
-import type { ClientMessage, CollectorMessage, WebappMessage, WebappRequest } from './Schema.ts'
-import { protocolVersion } from './Schema.ts'
+import type {
+  ClientMessage,
+  CollectorMessage,
+  TraceFileHeader,
+  WebappMessage,
+  WebappRequest,
+} from './Schema.ts'
+import { protocolVersion, traceFileFormatVersion } from './Schema.ts'
 
 const sessionId = 'session-1'
 const clock = { startTime: 1_000n, wallClockEpochMillis: 1_700_000_000_000 }
@@ -245,8 +252,34 @@ const webappRequests: Record<string, WebappRequest> = {
   Unsubscribe: { _tag: 'Unsubscribe', sessionId },
 }
 
+const traceFileHeaders: Record<string, TraceFileHeader> = {
+  'TraceFileHeader (active session)': {
+    _tag: 'TraceFileHeader',
+    formatVersion: traceFileFormatVersion,
+    protocolVersion,
+    session: { sessionId, program: 'example', pid: 4242, runtime: 'bun', clock, active: true },
+    savedAtEpochMillis: 1_700_000_009_000,
+  },
+  'TraceFileHeader (ended session)': {
+    _tag: 'TraceFileHeader',
+    formatVersion: traceFileFormatVersion,
+    protocolVersion,
+    session: {
+      sessionId,
+      program: 'example',
+      pid: 4242,
+      runtime: 'bun',
+      clock,
+      active: false,
+      endedAtEpochMillis: 1_700_000_005_000,
+    },
+    savedAtEpochMillis: 1_700_000_009_000,
+  },
+}
+
 const suites = [
   ['clientCodec', clientCodec, clientMessages],
+  ['traceFileHeaderCodec', traceFileHeaderCodec, traceFileHeaders],
   ['collectorCodec', collectorCodec, collectorMessages],
   ['webappCodec', webappCodec, webappMessages],
   ['webappRequestCodec', webappRequestCodec, webappRequests],
@@ -379,6 +412,35 @@ describe('decoding', () => {
     expect(
       Result.isFailure(
         clientCodec.decode(collectorCodec.encode(collectorMessages['MetricsRequest']!)),
+      ),
+    ).toBe(true)
+  })
+})
+
+describe('traceFileHeaderCodec', () => {
+  it('keeps the session clock lossless across a round trip', () => {
+    const header = {
+      ...traceFileHeaders['TraceFileHeader (active session)']!,
+      session: {
+        ...traceFileHeaders['TraceFileHeader (active session)']!.session,
+        clock: { startTime: 1_234_567_890_123_456_789n, wallClockEpochMillis: 1_700_000_000_000 },
+      },
+    }
+    expect(roundTrip(traceFileHeaderCodec, header)).toEqual(header)
+  })
+
+  it('rejects a client message, so a body line cannot pass as a header', () => {
+    expect(
+      Result.isFailure(traceFileHeaderCodec.decode(clientCodec.encode(clientMessages['Ping']!))),
+    ).toBe(true)
+  })
+
+  it('rejects a header on the client codec', () => {
+    expect(
+      Result.isFailure(
+        clientCodec.decode(
+          traceFileHeaderCodec.encode(traceFileHeaders['TraceFileHeader (active session)']!),
+        ),
       ),
     ).toBe(true)
   })

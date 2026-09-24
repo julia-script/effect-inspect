@@ -16,7 +16,8 @@
 import { Result } from 'effect'
 import { Atom } from 'effect/unstable/reactivity'
 import { webappCodec, webappRequestCodec } from '../../../src/protocol/Codec.ts'
-import type { Session, WebappMessage } from '../../../src/protocol/Schema.ts'
+import type { ClientMessage, Session, WebappMessage } from '../../../src/protocol/Schema.ts'
+import { isLoadedSession, loadedSession, parseTraceFile } from '../trace/TraceFile.ts'
 import { TraceStore } from '../trace/TraceStore.ts'
 
 /**
@@ -52,7 +53,36 @@ export const traceStore = new TraceStore()
 export const connectionStatusAtom = Atom.make<ConnectionStatus>({ _tag: 'Connecting' })
 
 /** Every session the collector knows about, newest first. */
-export const sessionsAtom = Atom.make<ReadonlyArray<Session>>([])
+export const liveSessionsAtom = Atom.make<ReadonlyArray<Session>>([])
+
+/** A trace read from a file: its session record plus the messages to replay. */
+export interface LoadedSession {
+  readonly session: Session
+  readonly messages: ReadonlyArray<ClientMessage>
+  /** Trailing lines the file lost to a truncated save; shown next to the session. */
+  readonly truncatedLines: number
+}
+
+/**
+ * Traces loaded from files this page load, newest first.
+ *
+ * Held in an atom rather than a module-level array because the session list
+ * renders from it; the *messages* are not per-span React state — they are
+ * replayed into {@link traceStore} in one `applyAll` on selection and never
+ * read by React again.
+ */
+export const loadedSessionsAtom = Atom.make<ReadonlyArray<LoadedSession>>([])
+
+/**
+ * Live and loaded sessions in one list, loaded first.
+ *
+ * Loaded traces sort above live ones so a file you just opened is where you
+ * are looking, rather than buried under whatever the collector is holding.
+ */
+export const sessionsAtom = Atom.readable((get): ReadonlyArray<Session> => [
+  ...get(loadedSessionsAtom).map((loaded) => loaded.session),
+  ...get(liveSessionsAtom),
+])
 
 /** The selected session id, or `undefined` when nothing is selected. */
 export const selectedSessionIdAtom = Atom.make<string | undefined>(undefined)
@@ -145,17 +175,30 @@ export const connectionAtom = Atom.keepAlive(
       if (socket?.readyState === WebSocket.OPEN) socket.send(webappRequestCodec.encode(request))
     }
 
-    /** Subscribes to whichever session is selected, unsubscribing from the old one. */
+    /**
+     * Points the store at whichever session is selected.
+     *
+     * A live session means subscribing to the collector; a loaded one means
+     * replaying its file's messages straight into the store. Both paths clear
+     * the store first, because it is shared across sessions.
+     */
     const syncSubscription = (): void => {
       const next = ctx.get(selectedSessionIdAtom)
       if (next === subscribed) return
-      if (subscribed !== undefined) send({ _tag: 'Unsubscribe', sessionId: subscribed })
+      if (subscribed !== undefined && !isLoadedSession(subscribed)) {
+        send({ _tag: 'Unsubscribe', sessionId: subscribed })
+      }
       subscribed = next
-      // The store is shared across sessions, so it must be emptied before the
-      // new session's backlog lands or the two traces would interleave.
       traceStore.clear()
       scheduleRepaint()
-      if (next !== undefined) send({ _tag: 'Subscribe', sessionId: next })
+      if (next === undefined) return
+      if (isLoadedSession(next)) {
+        const loaded = ctx.get(loadedSessionsAtom).find((entry) => entry.session.sessionId === next)
+        if (loaded !== undefined) traceStore.applyAll(loaded.messages)
+        scheduleRepaint()
+        return
+      }
+      send({ _tag: 'Subscribe', sessionId: next })
     }
 
     const handle = (message: WebappMessage): void => {
@@ -165,7 +208,7 @@ export const connectionAtom = Atom.keepAlive(
           const sessions = [...message.sessions].sort(
             (a, b) => b.clock.wallClockEpochMillis - a.clock.wallClockEpochMillis,
           )
-          ctx.set(sessionsAtom, sessions)
+          ctx.set(liveSessionsAtom, sessions)
           // Auto-select the newest session on first sight, so the app is useful
           // without a click — Chrome likewise opens on the active recording.
           if (ctx.get(selectedSessionIdAtom) === undefined && sessions.length > 0) {
@@ -186,19 +229,6 @@ export const connectionAtom = Atom.keepAlive(
           scheduleRepaint()
           break
         }
-        case 'SessionEnded': {
-          ctx.set(
-            sessionsAtom,
-            ctx
-              .get(sessionsAtom)
-              .map((session) =>
-                session.sessionId === message.sessionId
-                  ? { ...session, active: false, endedAtEpochMillis: message.endedAtEpochMillis }
-                  : session,
-              ),
-          )
-          break
-        }
       }
     }
 
@@ -212,7 +242,10 @@ export const connectionAtom = Atom.keepAlive(
       ws.onopen = () => {
         attempt = 0
         ctx.set(connectionStatusAtom, { _tag: 'Connected' })
-        // A reconnect has no subscription on the new socket, so re-send it.
+        // A reconnect has no subscription on the new socket, so re-send it —
+        // unless a loaded trace is selected, whose store contents a re-sync
+        // would clear for nothing.
+        if (subscribed !== undefined && isLoadedSession(subscribed)) return
         subscribed = undefined
         syncSubscription()
       }
@@ -236,7 +269,7 @@ export const connectionAtom = Atom.keepAlive(
       ws.onclose = () => {
         if (closed) return
         socket = undefined
-        subscribed = undefined
+        if (subscribed === undefined || !isLoadedSession(subscribed)) subscribed = undefined
         const delay = retryDelay(attempt)
         ctx.set(connectionStatusAtom, {
           _tag: 'Disconnected',
@@ -273,3 +306,59 @@ export const connectionAtom = Atom.keepAlive(
  */
 const decodeFrame = (data: string): ReadonlyArray<WebappMessage> | undefined =>
   Result.getOrUndefined(webappCodec.decodeAll(data))
+
+/**
+ * The slice of the atom registry the file actions need.
+ *
+ * Typed structurally rather than against `AtomRegistry` so these stay callable
+ * from a test with a two-line fake, which is what makes save/load testable
+ * without a browser.
+ */
+export interface Registry {
+  readonly get: <A>(atom: Atom.Atom<A>) => A
+  readonly set: <A>(atom: Atom.Writable<A, A>, value: A) => void
+}
+
+/**
+ * Adds a parsed trace file to the session list and selects it.
+ *
+ * Re-loading the same file replaces the existing entry rather than stacking a
+ * duplicate — the session id is derived from the file's, so a second copy
+ * would be indistinguishable in the list.
+ */
+export const addLoadedTrace = (
+  registry: Registry,
+  text: string,
+): Result.Result<Session, string> => {
+  const parsed = parseTraceFile(text)
+  if (Result.isFailure(parsed)) return Result.fail(parsed.failure.message)
+  const { header, messages, truncatedLines } = parsed.success
+  const session = loadedSession(header)
+  const entry: LoadedSession = { session, messages, truncatedLines }
+  registry.set(loadedSessionsAtom, [
+    entry,
+    ...registry
+      .get(loadedSessionsAtom)
+      .filter((existing) => existing.session.sessionId !== session.sessionId),
+  ])
+  registry.set(selectedSessionIdAtom, session.sessionId)
+  return Result.succeed(session)
+}
+
+/**
+ * The messages to write when saving the selected session.
+ *
+ * A loaded session is written back from the file's own messages rather than
+ * from the store, so re-exporting a file is lossless even for message types
+ * the chart does not draw.
+ */
+export const saveableMessages = (
+  registry: Registry,
+  sessionId: string,
+): ReadonlyArray<ClientMessage> => {
+  if (!isLoadedSession(sessionId)) return traceStore.raw
+  const loaded = registry
+    .get(loadedSessionsAtom)
+    .find((entry) => entry.session.sessionId === sessionId)
+  return loaded?.messages ?? traceStore.raw
+}

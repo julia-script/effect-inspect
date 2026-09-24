@@ -152,7 +152,13 @@ export const FlameChart = () => {
   useEffect(() => {
     activeRenderer = renderer
     if (import.meta.env.DEV) {
-      ;(globalThis as { __flameChart?: FlameRenderer | undefined }).__flameChart = renderer
+      ;(
+        globalThis as {
+          __flameChart?: FlameRenderer | undefined
+          __traceStore?: typeof traceStore | undefined
+        }
+      ).__flameChart = renderer
+      ;(globalThis as { __traceStore?: typeof traceStore | undefined }).__traceStore = traceStore
     }
     return () => {
       if (activeRenderer === renderer) activeRenderer = undefined

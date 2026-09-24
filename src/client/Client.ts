@@ -52,14 +52,25 @@ export class InspectClient extends Context.Service<
 
 /** Options accepted by the inspect layers. */
 export interface Options {
-  /** Name shown for this program in the webapp. Defaults to the entry script. */
+  /** Name shown for this program in the webapp. Defaults to the entry script's file name. */
   readonly programName?: string | undefined
   /** Outbound queue capacity, in messages. Defaults to 8192. */
   readonly bufferSize?: number | undefined
 }
 
-const programName = (options: Options | undefined): string =>
-  options?.programName ?? globalThis.process?.argv?.[1] ?? 'effect'
+/**
+ * The name this program lists as.
+ *
+ * The entry script's **file name**, not its path: `argv[1]` is absolute, so the
+ * default used to list a program as `/Users/.../examples/webapp.ts` and fill
+ * the session list with the same prefix over and over.
+ */
+const programName = (options: Options | undefined): string => {
+  if (options?.programName !== undefined) return options.programName
+  const script = globalThis.process?.argv?.[1]
+  if (script === undefined || script === '') return 'effect'
+  return script.split(/[/\\]/).pop() || script
+}
 
 const runtimeName = (): string => {
   const versions = globalThis.process?.versions

@@ -17,6 +17,12 @@
         "effecttsgo/global-random": "off",
         "effecttsgo/global-timers": "off"
       }
+    },
+    {
+      "files": ["app/src/trace/fixtures/**"],
+      "rules": {
+        "effecttsgo/node-builtin-import": "off"
+      }
     }
   ]
 }

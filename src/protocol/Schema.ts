@@ -362,7 +362,16 @@ export const Live = Schema.Struct({
 })
 export type Live = Schema.Schema.Type<typeof Live>
 
-/** A session ended — its program exited or its connection dropped. */
+/**
+ * A session ended — its program exited or its connection dropped.
+ *
+ * **Nothing emits this.** The collector marks the session `active: false` and
+ * re-sends the whole {@link SessionList} on every change, which already tells
+ * the webapp everything this message would. The variant is kept because the
+ * protocol is extended additively and removing it would break the union for
+ * anyone decoding an older stream; the webapp handler for it was deleted
+ * rather than left looking implemented.
+ */
 export const SessionEnded = Schema.Struct({
   _tag: Schema.tag('SessionEnded'),
   ...sessionId,
@@ -391,3 +400,29 @@ export type Unsubscribe = Schema.Schema.Type<typeof Unsubscribe>
 /** What the webapp sends to the collector. */
 export const WebappRequest = Schema.Union([Subscribe, Unsubscribe])
 export type WebappRequest = Schema.Schema.Type<typeof WebappRequest>
+
+/**
+ * Line 1 of a saved trace file.
+ *
+ * The rest of the file is {@link ClientMessage} NDJSON, byte-identical to what
+ * the wire carries — a trace file is the protocol message stream with a header
+ * on top, not a second representation of a trace. So any new `ClientMessage`
+ * variant is carried by a saved trace for free, and {@link traceFileFormatVersion}
+ * only moves if *this* struct or the line layout changes.
+ *
+ * The full {@link Session} is embedded because a loaded trace has no
+ * `SessionList` to get its `clock` from, and without the clock the webapp
+ * cannot show absolute times.
+ */
+export const TraceFileHeader = Schema.Struct({
+  _tag: Schema.tag('TraceFileHeader'),
+  formatVersion: Schema.Natural,
+  /** {@link protocolVersion} at save time. Recorded for diagnosis, not enforced. */
+  protocolVersion: Schema.Natural,
+  session: Session,
+  savedAtEpochMillis: Schema.Natural,
+})
+export type TraceFileHeader = Schema.Schema.Type<typeof TraceFileHeader>
+
+/** The trace file layout version. Bump only on a change to the header or the line layout. */
+export const traceFileFormatVersion = 1

@@ -119,6 +119,17 @@ export class TraceStore {
   readonly logs: Array<TraceLog> = []
 
   /**
+   * Every message ingested, in arrival order — the source for saving to a file.
+   *
+   * The rendered model above is lossy on purpose (relative millis, merged
+   * attributes, `Metrics`/`FiberEvent` dropped), so a file written from it
+   * would quietly lose whatever the chart does not draw. Keeping the decoded
+   * messages costs one array slot each — they are already allocated — and
+   * makes save a copy rather than a re-derivation.
+   */
+  readonly raw: Array<ClientMessage> = []
+
+  /**
    * Span ids bucketed by depth: `rows[2]` is every span nested two levels deep.
    *
    * This is the flame chart's row layout. It is maintained incrementally on
@@ -175,6 +186,7 @@ export class TraceStore {
     this.roots.length = 0
     this.openSpans.clear()
     this.logs.length = 0
+    this.raw.length = 0
     this.rows.length = 0
     this.pendingChildren.clear()
     this.origin = undefined
@@ -188,6 +200,7 @@ export class TraceStore {
 
   /** Ingests one client message. Unknown/undrawn variants are ignored, not errors. */
   apply(message: ClientMessage): void {
+    this.raw.push(message)
     switch (message._tag) {
       case 'Hello': {
         this.anchor(message.clock.startTime)

@@ -6,7 +6,13 @@
  * `make`-shaped factory, not touching callers.
  */
 import { Data, Result, Schema } from 'effect'
-import { ClientMessage, CollectorMessage, WebappMessage, WebappRequest } from './Schema.ts'
+import {
+  ClientMessage,
+  CollectorMessage,
+  TraceFileHeader,
+  WebappMessage,
+  WebappRequest,
+} from './Schema.ts'
 
 /** Raised when a message cannot be encoded — an out-of-domain field value. */
 export class EncodeError extends Data.TaggedError('EncodeError')<{
@@ -94,3 +100,6 @@ export const webappCodec = make(WebappMessage)
 
 /** Webapp → collector. */
 export const webappRequestCodec = make(WebappRequest)
+
+/** Line 1 of a saved trace file; the rest of the file is {@link clientCodec} lines. */
+export const traceFileHeaderCodec = make(TraceFileHeader)

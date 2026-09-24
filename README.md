@@ -7,6 +7,10 @@ Three processes: your program dials out to a long-lived **collector**, and the
 **webapp** reads the trace back from it. The collector owns the history, so
 restarting your program does not lose the trace.
 
+The collector's history is in memory only, so restarting _the collector_ does
+drop every trace it was holding. Save the ones you want to keep — see
+[Saving and loading traces](#saving-and-loading-traces).
+
 ## Quickstart
 
 ```bash
@@ -61,10 +65,26 @@ Options, all optional:
 ```ts
 Inspect.layer({
   url: 'ws://localhost:34437', // where the collector listens
-  programName: 'my-service', // what the session list shows
+  programName: 'my-service', // what the session list shows; defaults to the entry script's file name
   bufferSize: 8192, // outbound queue, in messages
 })
 ```
+
+## Saving and loading traces
+
+**save** in the header writes the selected session to a `.eitrace` file.
+**open** — or dropping a file anywhere on the page — reads one back. A loaded
+trace appears in the session list marked `file` and renders exactly like a live
+one: chart, event log, filter and detail panel all work, and **no collector
+needs to be running at all**.
+
+The file is the protocol message stream itself — one JSON line per message,
+with a small header carrying the session's clock — so a saved trace loses
+nothing the live view had, and saving a loaded trace again is lossless.
+
+This is also the answer to the collector's in-memory history: a trace you have
+saved survives a collector restart, a machine restart, and being emailed to
+someone else.
 
 **Adding the layer is safe anywhere.** If no collector is listening, the program
 runs exactly as it would have — no hang, no error, no delay. If the collector

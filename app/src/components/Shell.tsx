@@ -11,6 +11,8 @@ import type { Session } from '../../../src/protocol/Schema.ts'
 import { Drawer } from './Drawer.tsx'
 import { FlameChart } from './FlameChart.tsx'
 import { SpanDetail } from './SpanDetail.tsx'
+import { TraceFileControls } from './TraceFile.tsx'
+import { isLoadedSession } from '../trace/TraceFile.ts'
 import {
   COLLECTOR_URL,
   connectionAtom,
@@ -106,10 +108,10 @@ const SessionRow = ({
           session.active ? 'bg-neutral-300' : 'bg-neutral-700'
         }`}
       />
-      <span className="truncate text-xs">{session.program}</span>
+      <span className="truncate text-xs">{programLabel(session.program)}</span>
     </div>
     <div className="mt-1 flex justify-between pl-3.5 text-[10px] text-neutral-600">
-      <span>pid {session.pid}</span>
+      <span>{isLoadedSession(session.sessionId) ? 'file' : `pid ${session.pid}`}</span>
       <span className="tabular-nums">{formatTime(session.clock.wallClockEpochMillis)}</span>
     </div>
   </button>
@@ -154,11 +156,15 @@ const Offline = () => (
       <p className="text-sm text-neutral-300">Collector unreachable</p>
       <p className="mt-2 text-xs leading-relaxed text-neutral-600">
         Nothing is listening on <code className="text-neutral-500">{COLLECTOR_URL}</code>. Start the
-        collector; this page reconnects on its own.
+        collector; this page reconnects on its own. You can still open a saved trace file — drop one
+        anywhere on this page.
       </p>
     </div>
   </div>
 )
+
+/** A session's program, without the absolute path a default `programName` carries. */
+const programLabel = (program: string): string => program.split(/[/\\]/).pop() || program
 
 /** The chart, drawer and detail panel, once a session is selected. */
 const Workspace = () => {
@@ -189,20 +195,24 @@ export const Shell = () => {
   useAtomMount(connectionAtom)
   const status = useAtomValue(connectionStatusAtom)
   const session = useAtomValue(selectedSessionAtom)
+  // A trace read from a file needs no collector, so a dead socket must not
+  // replace the chart it is already rendering.
+  const loadedSelected = session !== undefined && isLoadedSession(session.sessionId)
 
   return (
-    <div className="flex h-screen flex-col bg-neutral-950 font-mono text-neutral-200 antialiased">
+    <div className="relative flex h-screen flex-col bg-neutral-950 font-mono text-neutral-200 antialiased">
       <header className="flex items-center justify-between border-b border-neutral-900 px-4 py-2">
         <div className="flex items-baseline gap-3">
           <h1 className="text-sm text-neutral-300">effect-inspect</h1>
           {session !== undefined && (
             <span className="text-xs text-neutral-600">
-              {session.program} · {session.runtime}
+              {programLabel(session.program)} · {session.runtime}
             </span>
           )}
         </div>
         <div className="flex items-center gap-5">
           <Stats />
+          <TraceFileControls />
           <ConnectionBadge />
         </div>
       </header>
@@ -210,7 +220,7 @@ export const Shell = () => {
       <div className="flex min-h-0 flex-1">
         <Sessions />
         <main className="flex min-w-0 flex-1 flex-col">
-          {status._tag === 'Disconnected' ? <Offline /> : <Workspace />}
+          {status._tag === 'Disconnected' && !loadedSelected ? <Offline /> : <Workspace />}
         </main>
       </div>
     </div>
