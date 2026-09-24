@@ -117,6 +117,27 @@ describe('Layout', () => {
     expect(built.rowOf.get('deep')).toBe(2)
   })
 
+  it('keeps rows overlap-free as an open span grows and latecomers arrive', () => {
+    // The hazard stickiness introduces: a pinned span's extent can grow (an
+    // open span runs to `now`) after neighbours were placed beside it. An open
+    // span always reaches the trace's right edge, so nothing is ever packed to
+    // its right — but assert it rather than trust it.
+    const traceStore = store([start('open', 0), start('a', 1), end('a', 2)])
+    let built = layout(traceStore)
+    for (let i = 0; i < 10; i++) {
+      traceStore.apply(start(`late-${i}`, 10 + i * 10))
+      traceStore.apply(end(`late-${i}`, 15 + i * 10))
+      built = layout(traceStore, built)
+      for (const row of built.rows) {
+        for (let k = 1; k < row.spans.length; k++) {
+          const previous = row.spans[k - 1]!
+          const current = row.spans[k]!
+          expect(current.start).toBeGreaterThanOrEqual(spanEnd(previous, built.duration))
+        }
+      }
+    }
+  })
+
   it('leaves no two spans overlapping on the same row', () => {
     // Property check over a messy trace: nested, concurrent and open spans.
     const messages = [start('root', 0)]
@@ -141,8 +162,10 @@ describe('Layout', () => {
     expect(layout(traceStore, first)).toBe(first)
   })
 
-  it('rebuilds after a late parent re-depths a subtree', () => {
-    // Child before parent: the child is a root at depth 0 until the parent lands.
+  it('rebuilds after a late parent lands, without moving the child already drawn', () => {
+    // Child before parent: the child is a root at depth 0 until the parent
+    // lands. Once it has been painted its row is final, so the late parent is
+    // placed around it rather than pushing it down — the live-stability rule.
     const traceStore = store([start('child', 10, 'parent')])
     const before = layout(traceStore)
     expect(before.rows[0]!.spans.map((span) => span.name)).toEqual(['child'])
@@ -150,8 +173,59 @@ describe('Layout', () => {
     traceStore.apply(start('parent', 0))
     const after = layout(traceStore, before)
     expect(after).not.toBe(before)
-    expect(after.rowOf.get('parent')).toBe(0)
-    expect(after.rowOf.get('child')).toBe(1)
+    expect(after.rowOf.get('child')).toBe(before.rowOf.get('child'))
+  })
+
+  it('never moves a span that has already been placed', () => {
+    // The live-stability rule, stated directly: rows only ever get added to.
+    const traceStore = store([start('root', 0), start('a', 1, 'root'), end('a', 5)])
+    let built = layout(traceStore)
+    const pinned = new Map(built.rowOf)
+
+    // A burst of concurrent latecomers, each of which would repack a
+    // from-scratch layout.
+    for (let i = 0; i < 12; i++) {
+      traceStore.apply(start(`late-${i}`, 2, 'root'))
+      traceStore.apply(end(`late-${i}`, 60))
+      built = layout(traceStore, built)
+      for (const [spanId, row] of pinned) expect(built.rowOf.get(spanId)).toBe(row)
+      for (const [spanId, row] of built.rowOf) pinned.set(spanId, row)
+    }
+  })
+
+  it('drops pinned rows when the store is cleared for a new session', () => {
+    // `clear()` only bumps `version`, so without a reset check the next
+    // session's spans would inherit rows from the last one — a lone root
+    // stranded on row 3 of an otherwise empty chart.
+    const traceStore = store([
+      start('root', 0),
+      start('a', 0, 'root'),
+      end('a', 100),
+      start('b', 1, 'root'),
+      end('b', 100),
+      start('reused', 2, 'root'),
+      end('reused', 100),
+    ])
+    const before = layout(traceStore)
+    expect(before.rowOf.get('reused')).toBe(3)
+
+    traceStore.clear()
+    traceStore.applyAll([start('reused', 0), end('reused', 10)])
+    const after = layout(traceStore, before)
+    expect(after.rowOf.get('reused')).toBe(0)
+    expect(after.rows.length).toBe(1)
+  })
+
+  it('places a late span on a fresh row rather than reusing a gap it would overlap', () => {
+    const traceStore = store([start('root', 0), start('wide', 0, 'root'), end('wide', 100)])
+    const first = layout(traceStore)
+    expect(first.rowOf.get('wide')).toBe(1)
+
+    traceStore.apply(start('overlapping', 10, 'root'))
+    traceStore.apply(end('overlapping', 90))
+    const second = layout(traceStore, first)
+    expect(second.rowOf.get('wide')).toBe(1)
+    expect(second.rowOf.get('overlapping')).toBe(2)
   })
 
   it('finds a wide span that began off-screen to the left', () => {

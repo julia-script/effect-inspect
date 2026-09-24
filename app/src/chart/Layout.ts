@@ -50,16 +50,24 @@ export const spanEnd = (span: TraceSpan, now: number): number => span.end ?? now
 /**
  * Returns a layout for the store's current version, reusing `previous` when
  * nothing has changed.
+ *
+ * **A span's row is final once assigned.** `previous.rowOf` is carried over
+ * verbatim and only spans the previous layout never saw are packed. A late
+ * arrival that fits nowhere takes a new row rather than repacking what the
+ * user is already looking at — under a live trace, rows never reshuffle.
+ *
+ * The cost is deliberate and one-directional: a trace watched live can end up
+ * taller than the same trace loaded from scratch, because a gap that opens up
+ * later is never reclaimed. Visual stability beats vertical compactness.
  */
 export const layout = (store: TraceStore, previous: Layout = EMPTY): Layout => {
   if (previous.version === store.version) return previous
   const duration = store.stats().duration
 
-  // Start order, ties broken by depth. Two invariants ride on this order:
-  // every row receives its spans already start-sorted (so `rowEnd` is the
-  // whole occupancy test), and a parent is always packed before its children
-  // (a child cannot start before its parent, and the depth tiebreak covers the
-  // equal-start case), so `rowOf.get(parentId)` is populated when asked.
+  // Start order, ties broken by depth, so a parent is packed before its
+  // children (a child cannot start before its parent; the depth tiebreak
+  // covers the equal-start case) and `rowOf.get(parentId)` is populated when
+  // a child asks for it.
   const ordered: Array<TraceSpan> = []
   for (const ids of store.rows) {
     for (const id of ids) {
@@ -69,34 +77,85 @@ export const layout = (store: TraceStore, previous: Layout = EMPTY): Layout => {
   }
   ordered.sort((a, b) => a.start - b.start || a.depth - b.depth)
 
+  // Rows carried over from the previous layout keep every span they had. New
+  // spans are placed around them, so a row is no longer filled in start order
+  // and one "last end" number cannot answer "is this row free at time t?".
+  //
+  // Occupancy is split in two so the common case stays O(1). New spans are
+  // placed in start order, so for those a single frontier per row —
+  // `freeFrom[r]`, the largest end among them — is exactly the test. Pinned
+  // spans are claimed up front in arbitrary order relative to the frontier, so
+  // they are the only ones that need an interval list, and it is short: it
+  // holds one entry per pinned span on that row. On a cold build there are no
+  // pinned spans and `pinned[r]` stays empty.
   const spansByRow: Array<Array<TraceSpan>> = []
-  // `rowEnd[r]` is the end of the last span placed on row r. Spans reach a row
-  // in start order, so one number per row is the whole occupancy test.
-  const rowEnd: Array<number> = []
+  const freeFrom: Array<number> = []
+  const pinned: Array<Array<{ readonly from: number; readonly to: number }>> = []
   const rowOf = new Map<string, number>()
 
-  for (const span of ordered) {
-    const parentRow = span.parentId === undefined ? undefined : rowOf.get(span.parentId)
-    // ponytail: linear scan from the first legal row. O(rows) per span, and
-    // rows only grow with peak concurrency, not with span count — a 10k-span
-    // trace 10 rows deep costs 100k comparisons. Swap in a per-row heap keyed
-    // on rowEnd if a trace ever runs thousands of spans wide.
-    let row = parentRow === undefined ? 0 : parentRow + 1
-    while (row < rowEnd.length && rowEnd[row]! > span.start) row++
-    if (row === spansByRow.length) {
+  const claim = (row: number, span: TraceSpan, isPinned: boolean): void => {
+    while (spansByRow.length <= row) {
       spansByRow.push([])
-      rowEnd.push(Number.NEGATIVE_INFINITY)
+      freeFrom.push(Number.NEGATIVE_INFINITY)
+      pinned.push([])
     }
+    const to = spanEnd(span, duration)
     spansByRow[row]!.push(span)
-    rowEnd[row] = spanEnd(span, duration)
+    if (isPinned) pinned[row]!.push({ from: span.start, to })
+    else if (to > freeFrom[row]!) freeFrom[row] = to
     rowOf.set(span.spanId, row)
   }
 
+  /** True when a span spanning `[from, to)` can be drawn on `row` untouched. */
+  const fits = (row: number, from: number, to: number): boolean => {
+    if (row >= spansByRow.length) return true
+    if (freeFrom[row]! > from) return false
+    return !pinned[row]!.some((i) => i.from < to && from < i.to)
+  }
+
+  // A session switch calls `TraceStore.clear()`, which only bumps `version` —
+  // so without this the next session's spans would be pinned to rows from the
+  // last one, stranding a lone root halfway down an otherwise empty chart.
+  // Spans are only ever added within a session, so losing one means a reset.
+  const keepRows = ordered.length >= previous.ordered.length
+
+  // Every pinned span claims its row up front. A new span placed later must
+  // see the whole occupied picture, including spans that start after it — so
+  // this cannot be folded into the placement loop, which runs in start order.
+  if (keepRows) {
+    for (const span of ordered) {
+      const pinnedRow = previous.rowOf.get(span.spanId)
+      if (pinnedRow !== undefined) claim(pinnedRow, span, true)
+    }
+  }
+
+  const rowFor = (span: TraceSpan): number => {
+    const parentRow = span.parentId === undefined ? undefined : rowOf.get(span.parentId)
+    const from = span.start
+    const to = spanEnd(span, duration)
+    // ponytail: linear scan from the first legal row. Rows grow with peak
+    // concurrency, not span count, and each row test is O(1) unless the row
+    // holds pinned spans reaching past its frontier. A realistic 13k-span
+    // trace is 10 rows and builds in ~5ms cold / ~1ms per live append; 13k
+    // spans all running at once is 13k rows and ~96ms, ingest-only. Swap in a
+    // row-index keyed on free-from time if a trace ever runs thousands wide.
+    let row = parentRow === undefined ? 0 : parentRow + 1
+    while (!fits(row, from, to)) row++
+    return row
+  }
+
+  for (const span of ordered) {
+    if (rowOf.has(span.spanId)) continue
+    claim(rowFor(span), span, false)
+  }
+
   const rows = spansByRow.map((spans) => {
-    // Spans arrive here in start order within a row (they were packed that
-    // way), so only the prefix maximum of end times is left to compute. A
-    // start-sorted row is *not* end-sorted once open spans run to `now`, which
-    // is what `firstVisible` binary-searches.
+    // A pinned span can be reached out of start order, so the row is sorted
+    // here rather than relying on insertion order. `forEachVisible` binary
+    // searches the prefix maximum of end times, which needs both: start order,
+    // and the running max (a start-sorted row is *not* end-sorted, because a
+    // wide span can contain several short ones).
+    spans.sort((a, b) => a.start - b.start)
     const maxEnd = new Float64Array(spans.length)
     let running = Number.NEGATIVE_INFINITY
     for (let i = 0; i < spans.length; i++) {
@@ -107,13 +166,7 @@ export const layout = (store: TraceStore, previous: Layout = EMPTY): Layout => {
     return { spans, maxEnd }
   })
 
-  return {
-    version: store.version,
-    rows,
-    rowOf,
-    duration,
-    ordered,
-  }
+  return { version: store.version, rows, rowOf, duration, ordered }
 }
 
 export const emptyLayout = (): Layout => EMPTY
