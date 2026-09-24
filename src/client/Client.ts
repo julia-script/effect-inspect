@@ -4,21 +4,53 @@
  *
  * The guarantee that shapes this module is that instrumenting a program must
  * never break or slow it. So the producer side is a synchronous, non-blocking
- * {@link InspectClient} `sendUnsafe` onto a sliding queue, and every transport
+ * {@link InspectClient} `sendUnsafe` onto a dropping queue, and every transport
  * concern — no collector listening, a mid-run disconnect, a consumer slower
  * than the program — is confined to a background fiber whose failures are
- * swallowed and retried. When the program outruns the socket the queue drops
- * its oldest messages and reports the count, rather than growing without bound
+ * swallowed and retried. When the program outruns the socket the queue refuses
+ * the newest messages and reports the count, rather than growing without bound
  * or pushing backpressure into the fibers being traced.
+ *
+ * Dropping rather than sliding, because *which* message is lost is the whole
+ * problem. A sliding queue evicts its oldest entries, so a burst threw away the
+ * `SpanEnd` of a span still running — and the session's `Hello`, the first
+ * message there is — while keeping the unrelated messages that caused the
+ * overrun. A span whose end was dropped renders as never-ending. Refusing at
+ * the tail instead keeps every message already accepted, so loss is a suffix of
+ * the burst rather than a hole punched through the session's history.
+ *
+ * The drain writes each dequeued batch as one newline-delimited frame rather
+ * than one frame per message, because a per-message write is what made the
+ * socket slow enough for a realistic burst to overrun the queue in the first
+ * place.
  */
-import { Context, Duration, Effect, Latch, Queue, Schedule, type Scope } from 'effect'
+import { Context, Duration, Effect, Latch, Queue, Result, Schedule, type Scope } from 'effect'
 import type { Socket } from 'effect/unstable/socket'
 import { Socket as SocketService } from 'effect/unstable/socket'
 import { clientCodec } from '../protocol/Codec.ts'
 import * as Protocol from '../protocol/Schema.ts'
 
-/** How many messages may be buffered before the oldest are dropped. */
-const defaultBufferSize = 8192
+/**
+ * How many messages may be buffered before new ones are refused.
+ *
+ * ponytail: the ceiling is counted in messages, not bytes. A message is a plain
+ * object held un-encoded, and the honest unit would be its retained size — but
+ * the only way to know that in `sendUnsafe` is to encode there, on the hot path
+ * of every traced span, duplicating work the drain already does. Measured
+ * instead: the reference workload's messages retain ~273 B each (and encode to
+ * ~275 B), so this bound is ~34 MB of queued telemetry. That is the documented
+ * ceiling — for *realistic* messages. Attribute values are user-supplied and
+ * unbounded, so a program annotating spans with megabyte strings can exceed it;
+ * the upgrade path is to track encoded bytes at the `writeBatch` boundary and
+ * feed that back as a byte budget, which costs a shared counter and is worth it
+ * only once someone actually hits it.
+ *
+ * 131,072 rather than the old 8,192 because batching the socket writes made the
+ * drain ~2.4x faster, so a deeper queue is cheap: it holds the entire 115,310
+ * message reference session at once, against a 31,563 msg/s peak that used to
+ * overrun 8,192 in a fifth of a second.
+ */
+const defaultBufferSize = 131072
 
 /** How often a `Ping` is sent, so the collector can see a quiet program is alive. */
 const pingInterval = Duration.seconds(3)
@@ -33,6 +65,30 @@ const defaultMemoryIntervalMillis = 100
  * exit, and that is the worse failure.
  */
 const flushTimeout = Duration.millis(250)
+
+/**
+ * How many encoded bytes may ride in one socket frame.
+ *
+ * The drain writes a whole `takeAll` batch as one newline-delimited frame,
+ * which is the point — but a batch is unbounded, and the measured peak second
+ * is ~8.5 MB, so one write could otherwise hand the WebSocket a single
+ * multi-megabyte buffer to hold and copy. 256 KiB is roughly a thousand
+ * messages at the measured ~275 B mean: large enough that the per-write cost
+ * this change exists to remove is amortised away, small enough that the
+ * transient copy stays a normal allocation rather than a heap spike. The
+ * collector splits on newlines across chunk boundaries, so where a frame is
+ * cut has no effect on what it parses.
+ */
+const maxFrameBytes = 256 * 1024
+
+/**
+ * How many messages may ride in one socket frame, whatever their size.
+ *
+ * A second bound for the pathological case the byte budget misses: a batch of
+ * very small messages would otherwise build one enormous array of strings
+ * before the join.
+ */
+const maxFrameMessages = 4096
 
 /** Reconnect backoff: doubling from 250ms, capped so a late collector is still found. */
 const reconnectSchedule = Schedule.exponential(Duration.millis(250)).pipe(
@@ -57,7 +113,7 @@ export class InspectClient extends Context.Service<
 export interface Options {
   /** Name shown for this program in the webapp. Defaults to the entry script's file name. */
   readonly programName?: string | undefined
-  /** Outbound queue capacity, in messages. Defaults to 8192. */
+  /** Outbound queue capacity, in messages. Defaults to 131072 (~34 MB). */
   readonly bufferSize?: number | undefined
   /**
    * How often to sample `process.memoryUsage()`, in milliseconds. Defaults to
@@ -161,7 +217,7 @@ export const make = (
   Effect.gen(function* () {
     const socket = yield* SocketService.Socket
     const capacity = options?.bufferSize ?? defaultBufferSize
-    const queue = yield* Queue.sliding<Protocol.ClientMessage>(capacity)
+    const queue = yield* Queue.dropping<Protocol.ClientMessage>(capacity)
     // Effect's `Crypto` can fail with a PlatformError and nothing on this path
     // is allowed to fail; a session id needs uniqueness, not strength.
     // oxlint-disable-next-line effecttsgo/crypto-random-uuid-in-effect
@@ -169,17 +225,25 @@ export const make = (
 
     // Tracked here rather than inside the queue so a drop survives a
     // reconnect: it is reported on the next `Hello`, which every reconnect
-    // re-sends. A sliding `offerUnsafe` always succeeds, so a full queue is
-    // the only drop signal there is.
+    // re-sends.
     // Open exactly while the queue is empty, so shutdown can ask "is everything
     // on the wire?" rather than guessing with a sleep.
     const flushed = Latch.makeUnsafe(true)
 
     let dropped = 0
     let reported = 0
+    // Total and non-blocking by construction, and it has to stay that way: this
+    // runs inside `Tracer.span`, `span.end` and a `Logger`, none of which can
+    // suspend or fail. A dropping `offerUnsafe` returns `false` when the queue
+    // is full instead of suspending, which is the entire reason the queue is
+    // dropping rather than a backpressuring `bounded` — refusing a message is a
+    // gap in a trace, whereas parking the fiber that emitted it is the traced
+    // program running slower because it is being watched.
     const sendUnsafe = (message: Protocol.ClientMessage): void => {
-      if (Queue.sizeUnsafe(queue) >= capacity) dropped += 1
-      Queue.offerUnsafe(queue, message)
+      if (!Queue.offerUnsafe(queue, message)) {
+        dropped += 1
+        return
+      }
       flushed.closeUnsafe()
     }
 
@@ -266,6 +330,43 @@ const connection = (deps: {
     const write = (message: Protocol.ClientMessage) =>
       Effect.suspend(() => writer.write(clientCodec.encode(message)))
 
+    /**
+     * Writes a batch as newline-delimited frames instead of one frame each.
+     *
+     * The codec already terminates every line with `\n`, so a frame is just
+     * the concatenation of its lines and the collector's line splitter carries
+     * an unterminated remainder across frames — batching needs no protocol
+     * change. Frames are cut at {@link maxFrameBytes} / {@link maxFrameMessages}
+     * so one huge batch cannot become one unbounded write.
+     *
+     * `encodeResult` rather than `encode`: `encode` throws, and a throw here
+     * would abandon the rest of an already-dequeued batch and tear down the
+     * connection over one out-of-domain field. A message that will not encode
+     * is dropped on its own and the batch carries on.
+     */
+    const writeBatch = (batch: ReadonlyArray<Protocol.ClientMessage>) =>
+      Effect.suspend(() => {
+        const frames: Array<string> = []
+        let lines: Array<string> = []
+        let bytes = 0
+        for (const message of batch) {
+          const encoded = Result.getOrUndefined(clientCodec.encodeResult(message))
+          if (encoded === undefined) continue
+          if (
+            lines.length > 0 &&
+            (bytes + encoded.length > maxFrameBytes || lines.length >= maxFrameMessages)
+          ) {
+            frames.push(lines.join(''))
+            lines = []
+            bytes = 0
+          }
+          lines.push(encoded)
+          bytes += encoded.length
+        }
+        if (lines.length > 0) frames.push(lines.join(''))
+        return Effect.forEach(frames, (frame) => writer.write(frame), { discard: true })
+      })
+
     yield* Effect.flatMap(deps.hello, write)
 
     // Keeps the connection warm and surfaces a half-open socket as a write
@@ -281,7 +382,7 @@ const connection = (deps: {
       // Announced before the batch, so the gap is ordered where it happened.
       const gap = yield* deps.reportDropped
       if (gap !== undefined) yield* write(gap)
-      yield* Effect.forEach(batch, write)
+      yield* writeBatch(batch)
       // Everything offered so far is on the wire. `sendUnsafe` closes the latch
       // again on the next message, so this tracks the queue rather than latching
       // permanently on the first quiet moment.

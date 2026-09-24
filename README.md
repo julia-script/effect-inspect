@@ -66,7 +66,7 @@ Options, all optional:
 Inspect.layer({
   url: 'ws://localhost:34437', // where the collector listens
   programName: 'my-service', // what the session list shows; defaults to the entry script's file name
-  bufferSize: 8192, // outbound queue, in messages
+  bufferSize: 131072, // outbound queue, in messages (~34 MB at the measured mean)
 })
 ```
 
@@ -89,9 +89,10 @@ someone else.
 **Adding the layer is safe anywhere.** If no collector is listening, the program
 runs exactly as it would have — no hang, no error, no delay. If the collector
 goes away mid-run the program keeps going and reconnects in the background,
-resuming the same session. If you outrun the socket, the oldest messages are
-dropped and the gap is reported as a warning in the trace, rather than pushing
-backpressure into your fibers.
+resuming the same session. If you outrun the socket, the buffer refuses the
+newest messages once it is full and reports the gap as a warning in the trace,
+rather than pushing backpressure into your fibers — so what you lose is the tail
+of a burst, never a span's start or end that already made it into the buffer.
 
 The one consequence: when the collector is down you get silence, not an error.
 The examples probe for it first and print a hint — worth copying if you hit
