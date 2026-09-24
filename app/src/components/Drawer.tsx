@@ -84,7 +84,9 @@ export const Drawer = () => {
     >
       <div
         onPointerDown={collapsed ? undefined : onPointerDown}
-        className={`flex items-center gap-1 px-2 ${collapsed ? '' : 'cursor-row-resize'}`}
+        className={`flex h-8 shrink-0 items-center gap-1 px-2 ${
+          collapsed ? '' : 'cursor-row-resize'
+        }`}
       >
         <div
           ref={tabList}

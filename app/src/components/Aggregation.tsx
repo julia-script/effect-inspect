@@ -10,6 +10,7 @@
  * group, which is what Chrome does when you click an aggregated row.
  */
 import { useAtom, useAtomValue } from '@effect/atom-react'
+import { FilterX } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { aggregate, type Aggregation, type SummaryRow, type TreeNode } from '../chart/aggregate.ts'
 import { filterAtom, filterHidesAtom, matches, selectedSpanIdAtom } from '../chart/selection.ts'
@@ -17,6 +18,7 @@ import { traceStore, traceVersionAtom } from '../state/atoms.ts'
 import { headCellClass, rowBackground, TABLE_HEAD } from './EventLog.tsx'
 import { chartViewport } from './FlameChart.tsx'
 import { formatDuration } from './format.ts'
+import { Empty as PanelEmpty } from './Panel.tsx'
 
 /** How often the drawer samples the chart's viewport. Not a frame — a gesture. */
 const VIEWPORT_POLL_MS = 150
@@ -59,7 +61,20 @@ const useAggregation = (): Aggregation => {
   )
 }
 
-const Empty = () => <p className="px-3 py-2 text-[11px] text-ink-3">No spans in view.</p>
+/**
+ * Nothing in the aggregation window.
+ *
+ * Unlike the other empty states this one is almost always *reachable* — it
+ * means the current filter or zoom excluded everything, not that the trace is
+ * empty — so the hint names the two controls that caused it.
+ */
+const Empty = () => (
+  <PanelEmpty
+    icon={FilterX}
+    title="No spans in view"
+    hint="These tabs aggregate the chart's visible range. Reset the zoom, or clear the filter, to widen it."
+  />
+)
 
 /** Right-aligned numeric cell, the same width in all three tabs. */
 const Cell = ({ children }: { readonly children: React.ReactNode }) => (

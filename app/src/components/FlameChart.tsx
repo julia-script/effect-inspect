@@ -93,13 +93,13 @@ const Toolbar = ({
   const [hides, setHides] = useAtom(filterHidesAtom)
 
   return (
-    <div className="flex items-center gap-2 border-b border-line bg-surface px-3 py-1.5">
+    <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-surface px-2">
       <input
         value={filter}
         onChange={(event) => setFilter(event.target.value)}
         placeholder="Filter spans…"
         aria-label="Filter spans"
-        className="w-56 rounded-control bg-field px-2 py-1 text-xs text-ink shadow-hairline placeholder:text-ink-3"
+        className="h-6 w-56 rounded-control bg-field px-2 text-xs text-ink shadow-hairline placeholder:text-ink-3"
       />
       <label className="flex items-center gap-1.5 text-[11px] text-ink-2">
         <input

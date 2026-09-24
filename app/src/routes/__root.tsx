@@ -2,6 +2,7 @@
 import { RegistryContext, RegistryProvider } from '@effect/atom-react'
 import { createRootRoute, HeadContent, Outlet, Scripts } from '@tanstack/react-router'
 import { type ReactNode, useContext, useEffect } from 'react'
+import { startPanelSync } from '../state/panels.ts'
 import { startThemeSync, THEME_BOOT_SCRIPT } from '../state/theme.ts'
 import styles from '../styles.css?url'
 
@@ -23,6 +24,7 @@ function RootComponent() {
       {/* One registry for the whole app, so the connection atom is shared. */}
       <RegistryProvider>
         <ThemeSync />
+        <PanelSync />
         <Outlet />
       </RegistryProvider>
     </RootDocument>
@@ -39,6 +41,19 @@ function RootComponent() {
 function ThemeSync() {
   const registry = useContext(RegistryContext)
   useEffect(() => startThemeSync(registry), [registry])
+  return null
+}
+
+/**
+ * Adopts and persists the side panels' collapse state.
+ *
+ * Separate from `ThemeSync` because they own different storage keys and have
+ * different failure modes: the theme has a boot script and a flash to avoid,
+ * the panels have neither.
+ */
+function PanelSync() {
+  const registry = useContext(RegistryContext)
+  useEffect(() => startPanelSync(registry), [registry])
   return null
 }
 

@@ -7,7 +7,9 @@
  * arriving never renders this tree directly.
  */
 import { useAtom, useAtomMount, useAtomValue } from '@effect/atom-react'
+import { MousePointerClick, PlugZap, Radio } from 'lucide-react'
 import type { Session } from '../../../src/protocol/Schema.ts'
+import { CollapseButton, CollapsedRail, Empty, PanelHeader, usePanel } from './Panel.tsx'
 import { Drawer } from './Drawer.tsx'
 import { FlameChart } from './FlameChart.tsx'
 import { SpanDetail } from './SpanDetail.tsx'
@@ -114,7 +116,7 @@ const SessionRow = ({
   <button
     type="button"
     onClick={onSelect}
-    className={`w-full border-l-2 px-3 py-2 text-left transition-colors ${
+    className={`w-full border-l-2 px-2 py-1.5 text-left transition-colors ${
       selected
         ? 'border-accent bg-hover text-ink'
         : 'border-transparent text-ink-2 hover:bg-hover hover:text-ink'
@@ -128,28 +130,66 @@ const SessionRow = ({
       />
       <span className="truncate text-xs">{programLabel(session.program)}</span>
     </div>
-    <div className="mt-1 flex justify-between pl-3.5 text-[10px] text-ink-3">
+    <div className="mt-0.5 flex justify-between pl-3.5 text-[10px] text-ink-3">
       <span>{isLoadedSession(session.sessionId) ? 'file' : `pid ${session.pid}`}</span>
       <span className="tabular-nums">{formatTime(session.clock.wallClockEpochMillis)}</span>
     </div>
   </button>
 )
 
+/** Empty sessions list: waiting on the collector, or waiting on a program. */
+const NoSessions = ({ connected }: { readonly connected: boolean }) =>
+  connected ? (
+    <Empty
+      icon={Radio}
+      title="No sessions yet"
+      hint={
+        <>
+          Run a program with the inspect layer attached, or drop a saved{' '}
+          <code className="text-ink-2">.eitrace</code> file anywhere on this page.
+        </>
+      }
+    />
+  ) : (
+    <Empty
+      icon={PlugZap}
+      title="Waiting for the collector"
+      hint={
+        <>
+          Start it with <code className="text-ink-2">bun run collector</code>. This page reconnects
+          on its own.
+        </>
+      }
+    />
+  )
+
 const Sessions = () => {
   const sessions = useAtomValue(sessionsAtom)
   const [selectedId, setSelectedId] = useAtom(selectedSessionIdAtom)
   const status = useAtomValue(connectionStatusAtom)
+  const [collapsed, toggle] = usePanel('sessions')
+
+  if (collapsed) {
+    return <CollapsedRail edge="left" title="Sessions" onToggle={toggle} id="sessions-panel" />
+  }
 
   return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-line bg-surface">
-      <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-ink-3">Sessions</div>
-      <div className="flex-1 overflow-y-auto">
+    <aside
+      id="sessions-panel"
+      className="flex w-56 shrink-0 flex-col border-r border-line bg-surface"
+    >
+      <PanelHeader title="Sessions">
+        <CollapseButton
+          edge="left"
+          collapsed={false}
+          onToggle={toggle}
+          label="Hide sessions"
+          controls="sessions-panel"
+        />
+      </PanelHeader>
+      <div className="min-h-0 flex-1 overflow-y-auto">
         {sessions.length === 0 ? (
-          <p className="px-3 py-2 text-xs leading-relaxed text-ink-3">
-            {status._tag === 'Connected'
-              ? 'No sessions yet. Run a program with the inspect layer.'
-              : 'Waiting for the collector.'}
-          </p>
+          <NoSessions connected={status._tag === 'Connected'} />
         ) : (
           sessions.map((session) => (
             <SessionRow
@@ -167,16 +207,18 @@ const Sessions = () => {
 
 /** Shown in place of the chart when the collector cannot be reached. */
 const Offline = () => (
-  <div className="flex flex-1 items-center justify-center">
-    <div className="max-w-sm text-center">
-      <p className="text-sm text-ink">Collector unreachable</p>
-      <p className="mt-2 text-xs leading-relaxed text-ink-2">
-        Nothing is listening on <code className="text-ink-3">{COLLECTOR_URL}</code>. Start the
-        collector; this page reconnects on its own. You can still open a saved trace file — drop one
-        anywhere on this page.
-      </p>
-    </div>
-  </div>
+  <Empty
+    className="flex-1"
+    icon={PlugZap}
+    title="Collector unreachable"
+    hint={
+      <>
+        Nothing is listening on <code className="text-ink-2">{COLLECTOR_URL}</code>. Start it with{' '}
+        <code className="text-ink-2">bun run collector</code> — this page reconnects on its own. You
+        can still open a saved trace: drop one anywhere on this page.
+      </>
+    }
+  />
 )
 
 /** A session's program, without the absolute path a default `programName` carries. */
@@ -188,19 +230,35 @@ const Workspace = () => {
 
   if (session === undefined) {
     return (
-      <div className="flex flex-1 items-center justify-center">
-        <p className="text-xs text-ink-3">Select a session.</p>
-      </div>
+      <Empty
+        className="flex-1"
+        icon={MousePointerClick}
+        title="No session selected"
+        hint="Pick a program from the sessions list to see its flame chart, event log and span detail."
+      />
     )
   }
 
   return (
     <div className="flex min-h-0 flex-1">
-      <div className="flex min-w-0 flex-1 flex-col border-t border-line">
+      {/*
+       * The detail panel is **first in the DOM and last on screen** (`order`).
+       *
+       * Source order is tab order, and the event log between the two is
+       * virtualized *button* rows — on a 10k-span trace that is thousands of
+       * tab stops. With the panel written last, its collapse control was
+       * reachable only after tabbing through every mounted row, which is
+       * "reachable" in the same sense a haystack is. Painting it on the right
+       * while keeping it early in the document costs one `order` class.
+       */}
+      <SpanDetail />
+      {/* No `border-t` here: the header already draws that rule, and a second
+          one both doubles it and drops this column 1px below the side panels
+          it should line up with. */}
+      <div className="order-first flex min-w-0 flex-1 flex-col">
         <FlameChart />
         <Drawer />
       </div>
-      <SpanDetail />
     </div>
   )
 }
@@ -217,16 +275,16 @@ export const Shell = () => {
 
   return (
     <div className="relative flex h-screen flex-col bg-page font-mono text-ink antialiased">
-      <header className="flex items-center justify-between border-b border-line bg-surface px-4 py-2">
-        <div className="flex items-baseline gap-3">
+      <header className="flex h-11 shrink-0 items-center justify-between gap-4 border-b border-line bg-surface px-3">
+        <div className="flex min-w-0 items-baseline gap-3">
           <h1 className="text-sm text-ink">effect-inspect</h1>
           {session !== undefined && (
-            <span className="text-xs text-ink-3">
+            <span className="truncate text-xs text-ink-3">
               {programLabel(session.program)} · {session.runtime}
             </span>
           )}
         </div>
-        <div className="flex items-center gap-5">
+        <div className="flex shrink-0 items-center gap-4">
           <Stats />
           <TraceFileControls />
           <ConnectionBadge />
