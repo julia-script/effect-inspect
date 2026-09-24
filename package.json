@@ -1,0 +1,35 @@
+{
+  "name": "effect-inspect",
+  "private": true,
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "lint": "oxlint --disable-nested-config .",
+    "format": "oxfmt --write .",
+    "check": "oxfmt --check . && oxlint --disable-nested-config . && bun run typecheck",
+    "check:write": "oxfmt --write . && oxlint --disable-nested-config --fix .",
+    "prepare": "effect-tsgo patch --oxlint",
+    "build": "tsc",
+    "dev": "tsc --watch --preserveWatchOutput",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "effect": "4.0.0-rc.117"
+  },
+  "devDependencies": {
+    "@effect/tsgo": "0.45.0",
+    "@types/bun": "1.4.2",
+    "oxfmt": "0.70.0",
+    "oxlint": "1.82.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "typescript": "7.0.2"
+  }
+}
