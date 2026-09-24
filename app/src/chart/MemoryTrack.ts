@@ -14,18 +14,10 @@
  * shows a chart identical to the one it showed before this existed.
  */
 import type { TraceMemorySample } from '../trace/TraceStore.ts'
+import type { Palette } from './palette.ts'
 
 /** Height of the track when a session has samples. Zero when it has none. */
 export const MEMORY_TRACK_HEIGHT = 40
-
-/** Grayscale, per the visual direction: the curve is light, its fill is faint. */
-const COLOR_CURVE = '#d4d4d4'
-/** The secondary `rss` line: dimmer than the heap, because it is secondary. */
-const COLOR_RSS = '#525252'
-const COLOR_FILL = 'rgba(212,212,212,0.16)'
-const COLOR_LABEL = '#525252'
-const COLOR_BASE = '#1c1c1c'
-const COLOR_BG = '#0a0a0a'
 
 /** Width of the clickable label that collapses and expands the track. */
 export const MEMORY_LABEL_WIDTH = 260
@@ -108,6 +100,14 @@ export interface MemoryTrackDraw {
   readonly traceEnd: number
   /** Time under the cursor, if any, so the readout marks it. */
   readonly cursorTime: number | undefined
+  /**
+   * The current theme's colours, resolved by the renderer.
+   *
+   * Passed in rather than read here: this module draws, it does not own a
+   * theme, and {@link readPalette} costs a style resolution that must happen
+   * once per theme change rather than once per track draw.
+   */
+  readonly palette: Palette
 }
 
 /**
@@ -122,8 +122,20 @@ export interface MemoryTrackDraw {
  * viewport rather than starting at its edge.
  */
 export const drawMemoryTrack = (draw: MemoryTrackDraw): void => {
-  const { ctx, samples, collapsed, top, height, width, timeToX, peak, trough, rssPeak, traceEnd } =
-    draw
+  const {
+    ctx,
+    samples,
+    collapsed,
+    top,
+    height,
+    width,
+    timeToX,
+    peak,
+    trough,
+    rssPeak,
+    traceEnd,
+    palette,
+  } = draw
   if (samples.length === 0 || height <= 0) return
 
   // Collapsed: just the handle, so the track can be brought back. Clicking
@@ -131,9 +143,9 @@ export const drawMemoryTrack = (draw: MemoryTrackDraw): void => {
   // pointer-down.
   if (collapsed) {
     ctx.save()
-    ctx.fillStyle = COLOR_BG
+    ctx.fillStyle = palette.bg
     ctx.fillRect(0, top, width, height)
-    ctx.fillStyle = COLOR_LABEL
+    ctx.fillStyle = palette.memoryLabel
     ctx.textAlign = 'left'
     ctx.fillText(`+ memory · heap peak ${formatBytes(peak)}`, 4, top + height / 2)
     ctx.restore()
@@ -185,9 +197,9 @@ export const drawMemoryTrack = (draw: MemoryTrackDraw): void => {
   ctx.lineTo(rightX, yOf(last.heapUsed))
   ctx.lineTo(rightX, bottom)
   ctx.closePath()
-  ctx.fillStyle = COLOR_FILL
+  ctx.fillStyle = palette.memoryFill
   ctx.fill()
-  ctx.strokeStyle = COLOR_CURVE
+  ctx.strokeStyle = palette.memoryCurve
   ctx.lineWidth = 1
   ctx.stroke()
 
@@ -202,14 +214,14 @@ export const drawMemoryTrack = (draw: MemoryTrackDraw): void => {
     ctx.moveTo(leftX, yRss(first.rss))
     for (const sample of samples) ctx.lineTo(xOf(sample.time), yRss(sample.rss))
     ctx.lineTo(rightX, yRss(last.rss))
-    ctx.strokeStyle = COLOR_RSS
+    ctx.strokeStyle = palette.memoryRss
     ctx.setLineDash([2, 2])
     ctx.stroke()
     ctx.setLineDash([])
   }
 
   // Baseline, so an empty stretch still reads as a track rather than a gap.
-  ctx.strokeStyle = COLOR_BASE
+  ctx.strokeStyle = palette.memoryBase
   ctx.beginPath()
   ctx.moveTo(0, bottom - 0.5)
   ctx.lineTo(width, bottom - 0.5)
@@ -219,9 +231,9 @@ export const drawMemoryTrack = (draw: MemoryTrackDraw): void => {
   // worse than no label at all.
   const label = `− memory · heap ${formatBytes(floor)}–${formatBytes(peak)} · rss ${formatBytes(rssPeak)}`
   ctx.textAlign = 'left'
-  ctx.fillStyle = COLOR_BG
+  ctx.fillStyle = palette.bg
   ctx.fillRect(0, top, ctx.measureText(label).width + 8, 13)
-  ctx.fillStyle = COLOR_LABEL
+  ctx.fillStyle = palette.memoryLabel
   ctx.fillText(label, 4, top + 7)
 
   ctx.restore()

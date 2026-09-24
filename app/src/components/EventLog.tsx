@@ -30,6 +30,39 @@ const ROW_HEIGHT = 22
 /** Rows rendered beyond the scroll window, so fast scrolling does not flash. */
 const OVERSCAN = 8
 
+/**
+ * The shared table chrome, lifted from the registry's `records-table` and
+ * `filter-table`: a sticky header on the panel surface, a strong rule under
+ * it, hover and selection as background changes on the row.
+ *
+ * `primitive-table-cell` is deliberately *not* used — it is 10px/12px padding
+ * for a roomy demo grid, and these rows are a fixed 22px so the virtualizer
+ * can multiply by them. The tokens are the part worth sharing, not the metric.
+ */
+export const TABLE_HEAD = 'flex shrink-0 border-b border-line-strong bg-surface px-2 text-ink-3'
+
+/** Header cell: quiet until hovered, full ink once it is the sort key. */
+export const headCellClass = (active: boolean): string =>
+  `py-1 text-left transition-colors hover:text-ink ${active ? 'text-ink' : ''}`
+
+/** Selected row wash — `records-table`'s accent mix over the panel surface. */
+const SELECTED = 'color-mix(in srgb, var(--accent) 10%, var(--surface))'
+
+/**
+ * Row background, in precedence order: selected, hovered, then the zebra
+ * stripe. The stripe is foundation's `--stripe` over `--stripe-bg`, which is
+ * what makes a dense numeric table scannable across its columns.
+ */
+export const rowBackground = (
+  selected: boolean,
+  hovered: boolean,
+  even: boolean,
+): string | undefined => {
+  if (selected) return SELECTED
+  if (hovered) return 'var(--hover)'
+  return even ? undefined : 'var(--stripe)'
+}
+
 type SortKey = 'start' | 'self' | 'total' | 'name'
 
 interface Row {
@@ -109,7 +142,7 @@ export const EventLog = () => {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col text-[11px]">
-      <div className="flex shrink-0 border-b border-neutral-900 px-2 text-neutral-600">
+      <div className={TABLE_HEAD}>
         {COLUMNS.map((column) => (
           <button
             key={column.key}
@@ -121,9 +154,9 @@ export const EventLog = () => {
                   : { key: column.key, desc: column.key !== 'name' && column.key !== 'start' },
               )
             }
-            className={`py-1 text-left hover:text-neutral-300 ${
+            className={`${headCellClass(sort.key === column.key)} ${
               column.key === 'name' ? 'flex-1 pl-3' : 'w-24 pr-3 text-right'
-            } ${sort.key === column.key ? 'text-neutral-300' : ''}`}
+            }`}
           >
             {column.label}
             {sort.key === column.key && (sort.desc ? ' ↓' : ' ↑')}
@@ -137,13 +170,14 @@ export const EventLog = () => {
         className="min-h-0 flex-1 overflow-y-auto"
       >
         {rows.length === 0 ? (
-          <p className="px-3 py-2 text-neutral-700">No spans match.</p>
+          <p className="px-3 py-2 text-ink-3">No spans match.</p>
         ) : (
           <div style={{ height: rows.length * ROW_HEIGHT, position: 'relative' }}>
             <div style={{ transform: `translateY(${first * ROW_HEIGHT}px)` }}>
-              {visible.map((row) => {
+              {visible.map((row, index) => {
                 const id = row.span.spanId
                 const failed = row.span.outcome?._tag === 'Failure'
+                const selected = id === selectedId
                 return (
                   <button
                     key={id}
@@ -154,19 +188,26 @@ export const EventLog = () => {
                     }}
                     onMouseEnter={() => setHoveredId(id)}
                     onMouseLeave={() => setHoveredId(undefined)}
-                    style={{ height: ROW_HEIGHT }}
-                    className={`flex w-full items-center px-2 text-left tabular-nums ${
-                      id === selectedId ? 'bg-neutral-800 text-neutral-100' : ''
-                    } ${id === hoveredId && id !== selectedId ? 'bg-neutral-900' : ''} ${
-                      row.matched ? 'text-neutral-400' : 'text-neutral-700'
-                    }`}
+                    style={{
+                      height: ROW_HEIGHT,
+                      // The stripe has to key off the row's absolute index, not
+                      // its index in the window — the window slides by one row
+                      // at a time, so a local parity would invert on every
+                      // scroll step.
+                      background: rowBackground(
+                        selected,
+                        id === hoveredId,
+                        (first + index) % 2 === 0,
+                      ),
+                    }}
+                    className={`flex w-full items-center px-2 text-left tabular-nums transition-colors ${
+                      selected ? 'text-ink' : ''
+                    } ${row.matched ? 'text-ink-2' : 'text-ink-3'}`}
                   >
                     <span className="w-24 pr-3 text-right">{formatDuration(row.span.start)}</span>
                     <span className="w-24 pr-3 text-right">{formatDuration(row.self)}</span>
                     <span className="w-24 pr-3 text-right">{formatDuration(row.total)}</span>
-                    <span
-                      className={`flex-1 truncate pl-3 ${failed ? 'text-red-400' : 'text-neutral-300'}`}
-                    >
+                    <span className={`flex-1 truncate pl-3 ${failed ? 'text-red' : 'text-ink'}`}>
                       {row.span.name}
                     </span>
                   </button>

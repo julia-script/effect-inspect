@@ -10,6 +10,7 @@ import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
 import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { FlameRenderer } from '../chart/Renderer.ts'
 import { Shortcuts } from './Shortcuts.tsx'
+import { Button } from './atoms/Button.tsx'
 import { useKeyboard } from './useKeyboard.ts'
 import type { Viewport } from '../chart/Viewport.ts'
 import { filterAtom, filterHidesAtom, hoveredSpanIdAtom } from '../chart/selection.ts'
@@ -45,29 +46,33 @@ const Tooltip = ({
 
   return (
     <div
-      className="pointer-events-none absolute z-10 w-64 rounded border border-neutral-800 bg-neutral-950/95 p-2 text-[11px] shadow-lg"
+      className="pointer-events-none absolute z-10 w-64 rounded-card border border-[var(--tooltip-border)] bg-[var(--tooltip-bg)] p-2 text-[11px] text-[var(--tooltip-fg)] shadow-overlay"
       style={{ left, top: hit.y + 20 }}
     >
-      <div className="truncate text-neutral-200">{span.name}</div>
-      <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-neutral-500">
+      <div className="truncate">{span.name}</div>
+      <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[var(--tooltip-muted)]">
         <dt>total</dt>
-        <dd className="text-right tabular-nums text-neutral-300">{formatDuration(total)}</dd>
+        <dd className="text-right tabular-nums text-[var(--tooltip-fg)]">
+          {formatDuration(total)}
+        </dd>
         <dt>self</dt>
-        <dd className="text-right tabular-nums text-neutral-300">{formatDuration(self)}</dd>
+        <dd className="text-right tabular-nums text-[var(--tooltip-fg)]">{formatDuration(self)}</dd>
         <dt>start</dt>
-        <dd className="text-right tabular-nums text-neutral-400">{formatDuration(span.start)}</dd>
+        <dd className="text-right tabular-nums text-[var(--tooltip-fg)]">
+          {formatDuration(span.start)}
+        </dd>
       </dl>
       {span.outcome?._tag === 'Failure' && (
-        <p className="mt-1.5 line-clamp-3 border-t border-neutral-800 pt-1.5 text-red-400">
+        <p className="mt-1.5 line-clamp-3 border-t border-[var(--tooltip-border)] pt-1.5 text-red">
           {span.outcome.error}
         </p>
       )}
       {attributes.length > 0 && (
-        <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 border-t border-neutral-800 pt-1.5 text-neutral-600">
+        <dl className="mt-1.5 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 border-t border-[var(--tooltip-border)] pt-1.5 text-[var(--tooltip-muted)]">
           {attributes.map(([key, value]) => (
             <div key={key} className="contents">
               <dt className="truncate">{key}</dt>
-              <dd className="truncate text-right text-neutral-400">{formatValue(value)}</dd>
+              <dd className="truncate text-right text-[var(--tooltip-fg)]">{formatValue(value)}</dd>
             </div>
           ))}
         </dl>
@@ -88,39 +93,36 @@ const Toolbar = ({
   const [hides, setHides] = useAtom(filterHidesAtom)
 
   return (
-    <div className="flex items-center gap-2 border-b border-neutral-900 px-3 py-1.5">
+    <div className="flex h-8 shrink-0 items-center gap-2 border-b border-line bg-surface px-2">
       <input
         value={filter}
         onChange={(event) => setFilter(event.target.value)}
         placeholder="Filter spans…"
         aria-label="Filter spans"
-        className="w-56 rounded-sm border border-neutral-800 bg-neutral-900 px-2 py-1 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-neutral-600 focus:outline-none"
+        className="h-6 w-56 rounded-control bg-field px-2 text-xs text-ink shadow-hairline placeholder:text-ink-3"
       />
-      <label className="flex items-center gap-1.5 text-[11px] text-neutral-500">
+      <label className="flex items-center gap-1.5 text-[11px] text-ink-2">
         <input
           type="checkbox"
           checked={hides}
           onChange={(event) => setHides(event.target.checked)}
-          className="accent-neutral-500"
+          className="accent-accent"
         />
         hide non-matching
       </label>
-      <button
-        type="button"
-        onClick={onReset}
-        className="ml-auto rounded-sm px-2 py-1 text-[11px] text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300"
-      >
+      <Button variant="quiet" size="xs" onClick={onReset} className="ml-auto text-ink-2">
         reset zoom
-      </button>
-      <button
-        type="button"
+      </Button>
+      <Button
+        variant="quiet"
+        size="xs"
         onClick={onShowHelp}
         aria-label="Keyboard shortcuts"
-        className="rounded-sm px-2 py-1 text-[11px] text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300"
+        className="text-ink-2"
       >
         ? keys
-      </button>
-      <span className="text-[11px] text-neutral-700">drag to pan · wheel to zoom · W/A/S/D</span>
+      </Button>
+      <span className="text-[11px] text-ink-3">drag to pan · wheel to zoom · W/A/S/D</span>
     </div>
   )
 }
