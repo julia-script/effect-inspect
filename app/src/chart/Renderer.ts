@@ -80,6 +80,8 @@ export class FlameRenderer {
   private dirty = true
   private lastVersion = -1
   private hover: Hit | undefined
+  /** Last pointer x while the cursor is over the canvas — the keyboard zoom anchor. */
+  private cursorX: number | undefined
   private drag: { readonly x: number; readonly view: Viewport } | undefined
   private overviewDrag: 'window' | 'edge' | undefined
   private overviewGrab = 0
@@ -161,6 +163,44 @@ export class FlameRenderer {
   /** The current time window — the overview strip and the ruler both read it. */
   viewport(): Viewport {
     return this.view
+  }
+
+  /**
+   * Zooms by `factor` (>1 out) around the keyboard anchor — W/S.
+   *
+   * The anchor is the cursor while it is over the chart, else the selected
+   * span's midpoint, else the window centre. That is Chrome's rule, and it is
+   * what makes W/S usable without a mouse at all: with a span selected,
+   * zooming keeps that span under the eye rather than drifting off screen.
+   */
+  zoomBy(factor: number): void {
+    this.setView(zoom(this.view, this.keyboardAnchor(), factor, this.total()))
+  }
+
+  /** Pans by a fraction of the window width — A/D. */
+  panBy(fraction: number): void {
+    this.setView(pan(this.view, (this.view.to - this.view.from) * fraction, this.total()))
+  }
+
+  /** Scrolls the rows vertically by `delta` CSS pixels, clamped to the content. */
+  scrollRows(delta: number): void {
+    const rows = this.layout.rows.length * ROW_HEIGHT
+    const visible = this.height - this.chartTop()
+    this.scrollY = Math.max(0, Math.min(this.scrollY + delta, Math.max(rows - visible, 0)))
+    this.invalidate()
+  }
+
+  /**
+   * Where a keyboard zoom pivots. The pointer position is remembered on every
+   * move and dropped on leave, so "cursor is over the chart" is a real test
+   * rather than a guess.
+   */
+  private keyboardAnchor(): number {
+    if (this.cursorX !== undefined) return this.xToTime(this.cursorX)
+    const selected = this.registry.get(selectedSpanIdAtom)
+    const span = selected === undefined ? undefined : traceStore.spans.get(selected)
+    if (span !== undefined) return (span.start + spanEnd(span, this.total())) / 2
+    return (this.view.from + this.view.to) / 2
   }
 
   /** The span the cursor is over, with its screen rect, for the tooltip. */
@@ -308,6 +348,7 @@ export class FlameRenderer {
 
   private onPointerMove = (event: PointerEvent): void => {
     const { x, y } = this.pointer(event)
+    this.cursorX = x
 
     if (this.overviewDrag !== undefined) {
       const total = this.total()
@@ -340,6 +381,7 @@ export class FlameRenderer {
 
   private onPointerLeave = (): void => {
     this.hover = undefined
+    this.cursorX = undefined
     this.registry.set(hoveredSpanIdAtom, undefined)
     this.invalidate()
   }
@@ -355,10 +397,7 @@ export class FlameRenderer {
     // Alt scrolls the rows vertically; shift pans horizontally. Zoom is on the
     // bare gesture because it is the one used constantly.
     if (event.altKey) {
-      const rows = this.layout.rows.length * ROW_HEIGHT
-      const visible = this.height - this.chartTop()
-      this.scrollY = Math.max(0, Math.min(this.scrollY + event.deltaY, Math.max(rows - visible, 0)))
-      this.invalidate()
+      this.scrollRows(event.deltaY)
       return
     }
 
