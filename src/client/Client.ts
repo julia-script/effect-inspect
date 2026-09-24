@@ -10,8 +10,13 @@
  * swallowed and retried. When the program outruns the socket the queue drops
  * its oldest messages and reports the count, rather than growing without bound
  * or pushing backpressure into the fibers being traced.
+ *
+ * The drain writes each dequeued batch as one newline-delimited frame rather
+ * than one frame per message, because a per-message write is what made the
+ * socket slow enough for a realistic burst to overrun the queue in the first
+ * place.
  */
-import { Context, Duration, Effect, Latch, Queue, Schedule, type Scope } from 'effect'
+import { Context, Duration, Effect, Latch, Queue, Result, Schedule, type Scope } from 'effect'
 import type { Socket } from 'effect/unstable/socket'
 import { Socket as SocketService } from 'effect/unstable/socket'
 import { clientCodec } from '../protocol/Codec.ts'
@@ -33,6 +38,30 @@ const defaultMemoryIntervalMillis = 100
  * exit, and that is the worse failure.
  */
 const flushTimeout = Duration.millis(250)
+
+/**
+ * How many encoded bytes may ride in one socket frame.
+ *
+ * The drain writes a whole `takeAll` batch as one newline-delimited frame,
+ * which is the point — but a batch is unbounded, and the measured peak second
+ * is ~8.5 MB, so one write could otherwise hand the WebSocket a single
+ * multi-megabyte buffer to hold and copy. 256 KiB is roughly a thousand
+ * messages at the measured ~275 B mean: large enough that the per-write cost
+ * this change exists to remove is amortised away, small enough that the
+ * transient copy stays a normal allocation rather than a heap spike. The
+ * collector splits on newlines across chunk boundaries, so where a frame is
+ * cut has no effect on what it parses.
+ */
+const maxFrameBytes = 256 * 1024
+
+/**
+ * How many messages may ride in one socket frame, whatever their size.
+ *
+ * A second bound for the pathological case the byte budget misses: a batch of
+ * very small messages would otherwise build one enormous array of strings
+ * before the join.
+ */
+const maxFrameMessages = 4096
 
 /** Reconnect backoff: doubling from 250ms, capped so a late collector is still found. */
 const reconnectSchedule = Schedule.exponential(Duration.millis(250)).pipe(
@@ -266,6 +295,43 @@ const connection = (deps: {
     const write = (message: Protocol.ClientMessage) =>
       Effect.suspend(() => writer.write(clientCodec.encode(message)))
 
+    /**
+     * Writes a batch as newline-delimited frames instead of one frame each.
+     *
+     * The codec already terminates every line with `\n`, so a frame is just
+     * the concatenation of its lines and the collector's line splitter carries
+     * an unterminated remainder across frames — batching needs no protocol
+     * change. Frames are cut at {@link maxFrameBytes} / {@link maxFrameMessages}
+     * so one huge batch cannot become one unbounded write.
+     *
+     * `encodeResult` rather than `encode`: `encode` throws, and a throw here
+     * would abandon the rest of an already-dequeued batch and tear down the
+     * connection over one out-of-domain field. A message that will not encode
+     * is dropped on its own and the batch carries on.
+     */
+    const writeBatch = (batch: ReadonlyArray<Protocol.ClientMessage>) =>
+      Effect.suspend(() => {
+        const frames: Array<string> = []
+        let lines: Array<string> = []
+        let bytes = 0
+        for (const message of batch) {
+          const encoded = Result.getOrUndefined(clientCodec.encodeResult(message))
+          if (encoded === undefined) continue
+          if (
+            lines.length > 0 &&
+            (bytes + encoded.length > maxFrameBytes || lines.length >= maxFrameMessages)
+          ) {
+            frames.push(lines.join(''))
+            lines = []
+            bytes = 0
+          }
+          lines.push(encoded)
+          bytes += encoded.length
+        }
+        if (lines.length > 0) frames.push(lines.join(''))
+        return Effect.forEach(frames, (frame) => writer.write(frame), { discard: true })
+      })
+
     yield* Effect.flatMap(deps.hello, write)
 
     // Keeps the connection warm and surfaces a half-open socket as a write
@@ -281,7 +347,7 @@ const connection = (deps: {
       // Announced before the batch, so the gap is ordered where it happened.
       const gap = yield* deps.reportDropped
       if (gap !== undefined) yield* write(gap)
-      yield* Effect.forEach(batch, write)
+      yield* writeBatch(batch)
       // Everything offered so far is on the wire. `sendUnsafe` closes the latch
       // again on the next message, so this tracks the queue rather than latching
       // permanently on the first quiet moment.
