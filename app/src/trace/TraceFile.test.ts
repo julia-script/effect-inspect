@@ -231,3 +231,13 @@ describe('the committed firehose fixture', () => {
     expect(stats.duration).toBeGreaterThan(0)
   })
 })
+
+describe('re-saving a loaded trace', () => {
+  it('does not stack the loaded prefix on the session id', () => {
+    const once = loadedSession(Result.getOrThrow(parseTraceFile(saved())).header)
+    const twice = loadedSession(
+      Result.getOrThrow(parseTraceFile(serializeTraceFile(once, messages, 2))).header,
+    )
+    expect(twice.sessionId).toBe(once.sessionId)
+  })
+})

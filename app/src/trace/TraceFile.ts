@@ -144,7 +144,11 @@ export const parseTraceFile = (text: string): Result.Result<LoadedTrace, TraceFi
 /** The `Session` a loaded trace lists as: never active, id namespaced so it cannot collide. */
 export const loadedSession = (header: TraceFileHeader): Session => ({
   ...header.session,
-  sessionId: `${loadedSessionPrefix}${header.session.sessionId}`,
+  // Idempotent: re-saving a loaded trace and loading it again must not stack
+  // `loaded:loaded:` prefixes onto the id.
+  sessionId: isLoadedSession(header.session.sessionId)
+    ? header.session.sessionId
+    : `${loadedSessionPrefix}${header.session.sessionId}`,
   active: false,
   endedAtEpochMillis: header.session.endedAtEpochMillis ?? header.savedAtEpochMillis,
 })
