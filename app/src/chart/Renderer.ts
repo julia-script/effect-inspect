@@ -146,8 +146,9 @@ export class FlameRenderer {
     this.setView(clamp({ from: centre - width / 2, to: centre + width / 2 }, total))
 
     // Bring the span's row into the vertical window too, or "reveal" only
-    // half-works on a deep trace.
-    const top = span.depth * ROW_HEIGHT
+    // half-works on a deep trace. Rows are packed, so the row is the layout's
+    // answer, not the span's depth.
+    const top = (this.layout.rowOf.get(span.spanId) ?? span.depth) * ROW_HEIGHT
     const viewTop = this.chartTop()
     const visible = this.height - viewTop
     if (top < this.scrollY) this.scrollY = top
@@ -249,16 +250,17 @@ export class FlameRenderer {
   private hitTest(x: number, y: number): Hit | undefined {
     const top = this.chartTop()
     if (y < top) return undefined
-    const depth = Math.floor((y - top + this.scrollY) / ROW_HEIGHT)
-    const row = this.layout.rows[depth]
+    const rowIndex = Math.floor((y - top + this.scrollY) / ROW_HEIGHT)
+    const row = this.layout.rows[rowIndex]
     if (row === undefined) return undefined
 
     const total = this.total()
     const tolerance = ((this.view.to - this.view.from) / this.width) * 2
     const time = this.xToTime(x)
     let found: TraceSpan | undefined
-    // Last match wins: rows are start-sorted, so for overlapping bars the one
-    // drawn last (and therefore visible) is the one the user is pointing at.
+    // Last match wins. Packed rows never overlap, so at most one span really
+    // contains the cursor; the tolerance window is what can match twice, and
+    // the later (rightward) span is the one the cursor is closer to.
     forEachVisible(row, time - tolerance, time + tolerance, total, (span) => {
       if (span.start - tolerance <= time && spanEnd(span, total) + tolerance >= time) found = span
     })
@@ -269,7 +271,7 @@ export class FlameRenderer {
     return {
       span: found,
       x: x0,
-      y: top + depth * ROW_HEIGHT - this.scrollY,
+      y: top + rowIndex * ROW_HEIGHT - this.scrollY,
       width: Math.max(x1 - x0, 1),
     }
   }
@@ -411,14 +413,14 @@ export class FlameRenderer {
     const rows = this.layout.rows.length
     if (rows > 0) {
       const rowHeight = Math.max((OVERVIEW_HEIGHT - 4) / rows, 0.5)
-      for (let depth = 0; depth < rows; depth++) {
-        const row = this.layout.rows[depth]!
-        const y = 2 + depth * rowHeight
-        ctx.fillStyle = DEPTH_FILL[depth % DEPTH_FILL.length]!
+      for (let rowIndex = 0; rowIndex < rows; rowIndex++) {
+        const row = this.layout.rows[rowIndex]!
+        const y = 2 + rowIndex * rowHeight
         for (const span of row.spans) {
           const x0 = (span.start / total) * this.width
           const x1 = (spanEnd(span, total) / total) * this.width
           if (filter !== '' && !matches(span.name, filter)) continue
+          ctx.fillStyle = DEPTH_FILL[span.depth % DEPTH_FILL.length]!
           ctx.fillRect(x0, y, Math.max(x1 - x0, 0.5), Math.max(rowHeight - 0.5, 0.5))
         }
       }
@@ -489,11 +491,10 @@ export class FlameRenderer {
     )
 
     ctx.textAlign = 'left'
-    for (let depth = firstRow; depth <= lastRow; depth++) {
-      const row = this.layout.rows[depth]
+    for (let rowIndex = firstRow; rowIndex <= lastRow; rowIndex++) {
+      const row = this.layout.rows[rowIndex]
       if (row === undefined) continue
-      const y = top + depth * ROW_HEIGHT - this.scrollY
-      const fill = DEPTH_FILL[depth % DEPTH_FILL.length]!
+      const y = top + rowIndex * ROW_HEIGHT - this.scrollY
 
       forEachVisible(row, this.view.from, this.view.to, total, (span) => {
         const matched = matches(span.name, filter)
@@ -508,7 +509,9 @@ export class FlameRenderer {
 
         ctx.globalAlpha = matched ? 1 : 0.22
         if (failed) ctx.fillStyle = hot ? COLOR_ERROR_HOT : COLOR_ERROR
-        else ctx.fillStyle = hot ? COLOR_LABEL_DIM : fill
+        // Brightness carries *nesting* weight, so the fill keys on the span's
+        // depth, not on the packed row it happened to land in.
+        else ctx.fillStyle = hot ? COLOR_LABEL_DIM : DEPTH_FILL[span.depth % DEPTH_FILL.length]!
         ctx.fillRect(x0, y, width, ROW_HEIGHT - BAR_GAP)
 
         if (span.spanId === selected) {

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'bun:test'
 import type { ClientMessage } from '../../../src/protocol/Schema.ts'
 import { TraceStore } from '../trace/TraceStore.ts'
-import { firstVisible, forEachVisible, layout } from './Layout.ts'
+import { firstVisible, forEachVisible, layout, spanEnd } from './Layout.ts'
 import { formatTick, tickTimes } from './Renderer.ts'
 import { timings } from './metrics.ts'
 import { matches } from './selection.ts'
@@ -67,7 +67,7 @@ describe('Viewport', () => {
 })
 
 describe('Layout', () => {
-  it('buckets by depth and sorts each row by start', () => {
+  it('packs non-overlapping siblings onto one row, in start order', () => {
     const traceStore = store([
       start('root', 0),
       start('b', 30, 'root'),
@@ -81,6 +81,58 @@ describe('Layout', () => {
       ['root'],
       ['a', 'b'],
     ])
+  })
+
+  it('gives concurrent siblings their own rows instead of painting them over each other', () => {
+    // The bug this packer exists for: eight tasks at depth 1, all overlapping.
+    const messages = [start('root', 0)]
+    for (let i = 0; i < 8; i++) {
+      messages.push(start(`task-${i}`, i, 'root'), end(`task-${i}`, 100 - i))
+    }
+    messages.push(end('root', 100))
+    const built = layout(store(messages))
+
+    expect(built.rows.length).toBe(9)
+    for (let i = 0; i < 8; i++) {
+      expect(built.rowOf.get(`task-${i}`)).toBe(i + 1)
+    }
+  })
+
+  it('never puts a child above its parent, even when a row below is free', () => {
+    // `shallow` is at depth 1 and ends early, so row 1 is free when `deep`
+    // (depth 2) is packed — but a child must stay below its parent.
+    const traceStore = store([
+      start('root', 0),
+      start('shallow', 0, 'root'),
+      end('shallow', 10),
+      start('mid', 20, 'root'),
+      start('deep', 25, 'mid'),
+      end('deep', 30),
+      end('mid', 40),
+      end('root', 50),
+    ])
+    const built = layout(traceStore)
+    expect(built.rowOf.get('shallow')).toBe(1)
+    expect(built.rowOf.get('mid')).toBe(1)
+    expect(built.rowOf.get('deep')).toBe(2)
+  })
+
+  it('leaves no two spans overlapping on the same row', () => {
+    // Property check over a messy trace: nested, concurrent and open spans.
+    const messages = [start('root', 0)]
+    for (let i = 0; i < 40; i++) {
+      messages.push(start(`a-${i}`, i * 2, 'root'), end(`a-${i}`, i * 2 + 45))
+      messages.push(start(`b-${i}`, i * 2 + 1, `a-${i}`))
+      if (i % 3 !== 0) messages.push(end(`b-${i}`, i * 2 + 20))
+    }
+    const built = layout(store(messages))
+    for (const row of built.rows) {
+      for (let i = 1; i < row.spans.length; i++) {
+        const previous = row.spans[i - 1]!
+        const current = row.spans[i]!
+        expect(current.start).toBeGreaterThanOrEqual(spanEnd(previous, built.duration))
+      }
+    }
   })
 
   it('reuses the previous layout when the store has not changed', () => {
@@ -98,8 +150,8 @@ describe('Layout', () => {
     traceStore.apply(start('parent', 0))
     const after = layout(traceStore, before)
     expect(after).not.toBe(before)
-    expect(after.rows[0]!.spans.map((span) => span.name)).toEqual(['parent'])
-    expect(after.rows[1]!.spans.map((span) => span.name)).toEqual(['child'])
+    expect(after.rowOf.get('parent')).toBe(0)
+    expect(after.rowOf.get('child')).toBe(1)
   })
 
   it('finds a wide span that began off-screen to the left', () => {
@@ -241,6 +293,17 @@ describe('10k spans', () => {
     expect(visited / frames).toBeLessThan(500)
     // And it is fast enough that the draw call, not the index, is the budget.
     expect(perFrame).toBeLessThan(2)
+  })
+
+  it('packs a 10k-span trace in well under a frame', () => {
+    // Packing is ingest-only work, but it lands on the same rAF tick as a
+    // draw, so it has to fit inside the frame alongside it.
+    const traceStore = big()
+    const startedAt = performance.now()
+    const built = layout(traceStore)
+    expect(performance.now() - startedAt).toBeLessThan(16)
+    // A sequential trace must not explode into thousands of rows.
+    expect(built.rows.length).toBeLessThan(20)
   })
 
   it('reuses the index across pan frames, so only ingest pays for the sort', () => {
