@@ -295,7 +295,7 @@ describe('Inspect.layer', () => {
     }
   })
 
-  it('drops the oldest messages instead of growing without bound', async () => {
+  it('refuses new messages instead of growing without bound', async () => {
     const { messages } = await withCollector(
       // A queue far smaller than the burst, so the overflow path is forced.
       Effect.forEach(
