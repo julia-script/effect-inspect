@@ -214,6 +214,24 @@ const clientMessages: Record<string, ClientMessage> = {
     event: 'Suspend',
     time: 7_100n,
   },
+  MemorySample: {
+    _tag: 'MemorySample',
+    sessionId,
+    time: 8_000n,
+    heapUsed: 12_345_678,
+    heapTotal: 23_456_789,
+    rss: 98_765_432,
+    external: 1_234,
+  },
+  'MemorySample (all zero)': {
+    _tag: 'MemorySample',
+    sessionId,
+    time: 8_100n,
+    heapUsed: 0,
+    heapTotal: 0,
+    rss: 0,
+    external: 0,
+  },
   Ping: { _tag: 'Ping', sessionId },
 }
 

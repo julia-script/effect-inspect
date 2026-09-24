@@ -22,6 +22,14 @@ import {
   selectedSpanIdAtom,
 } from './selection.ts'
 import { clamp, isFull, pan, type Viewport, zoom } from './Viewport.ts'
+import {
+  drawMemoryTrack,
+  formatBytes,
+  MEMORY_LABEL_WIDTH,
+  sampleAt,
+  trackHeight,
+} from './MemoryTrack.ts'
+import { memoryCollapsedAtom } from './selection.ts'
 
 /** Height of the whole-trace overview strip, in CSS pixels. */
 const OVERVIEW_HEIGHT = 34
@@ -114,6 +122,7 @@ export class FlameRenderer {
       registry.subscribe(hoveredSpanIdAtom, repaint),
       registry.subscribe(filterAtom, repaint),
       registry.subscribe(filterHidesAtom, repaint),
+      registry.subscribe(memoryCollapsedAtom, repaint),
     )
 
     this.loop()
@@ -170,8 +179,8 @@ export class FlameRenderer {
    *
    * The anchor is the cursor while it is over the chart, else the selected
    * span's midpoint, else the window centre. That is Chrome's rule, and it is
-   * what makes W/S usable without a mouse at all: with a span selected,
-   * zooming keeps that span under the eye rather than drifting off screen.
+   * what makes W/S usable without a mouse at all: with a span selected, zooming
+   * keeps that span under the eye rather than drifting off screen.
    */
   zoomBy(factor: number): void {
     this.setView(zoom(this.view, this.keyboardAnchor(), factor, this.total()))
@@ -216,8 +225,25 @@ export class FlameRenderer {
     return Math.max(this.layout.duration, 0.001)
   }
 
+  /**
+   * Height the memory track occupies right now.
+   *
+   * Zero when the session has no samples, so a trace recorded in a runtime
+   * without `process.memoryUsage` gets no empty band — and zero when collapsed.
+   */
+  private memoryHeight(): number {
+    return trackHeight(traceStore.memory, this.registry.get(memoryCollapsedAtom))
+  }
+
+  /**
+   * Top of the bar area — below the overview, the ruler and the memory track.
+   *
+   * Everything vertical in this class routes through here: hit testing, row
+   * scrolling, gridlines and `revealSpan`. So the memory track pushing the bars
+   * down is one number, and nothing else has to know it moved.
+   */
   private chartTop(): number {
-    return OVERVIEW_HEIGHT + RULER_HEIGHT
+    return OVERVIEW_HEIGHT + RULER_HEIGHT + this.memoryHeight()
   }
 
   private setView(next: Viewport): void {
@@ -341,6 +367,22 @@ export class FlameRenderer {
       return
     }
 
+    // The track's label is its own collapse toggle: the track is canvas, so a
+    // DOM control for it would mean the chart's React tree owning a piece of
+    // chart chrome it otherwise knows nothing about.
+    const memoryHeight = this.memoryHeight()
+    const memoryTop = OVERVIEW_HEIGHT + RULER_HEIGHT
+    if (
+      memoryHeight > 0 &&
+      y >= memoryTop &&
+      y < memoryTop + memoryHeight &&
+      x < MEMORY_LABEL_WIDTH
+    ) {
+      this.registry.set(memoryCollapsedAtom, !this.registry.get(memoryCollapsedAtom))
+      this.invalidate()
+      return
+    }
+
     const hit = this.hitTest(x, y)
     this.registry.set(selectedSpanIdAtom, hit?.span.spanId)
     this.drag = { x, view: this.view }
@@ -435,6 +477,7 @@ export class FlameRenderer {
 
     this.drawOverview(filter)
     const ticks = this.drawRuler()
+    this.drawMemory()
     this.drawBars(filter, hides, selected, ticks)
   }
 
@@ -495,6 +538,66 @@ export class FlameRenderer {
     ctx.lineTo(this.width, y + RULER_HEIGHT - 0.5)
     ctx.stroke()
     return ticks
+  }
+
+  /**
+   * The memory track, drawn with this renderer's own `timeToX`.
+   *
+   * Sharing the coordinate function rather than the numbers is what makes the
+   * track x-aligned with the bars at every zoom level: there is no second
+   * viewport to keep in sync, so there is nothing to drift.
+   */
+  private drawMemory(): void {
+    const height = this.memoryHeight()
+    if (height === 0) return
+    const top = OVERVIEW_HEIGHT + RULER_HEIGHT
+    // `cursorX` is the pointer position the renderer already tracks for the
+    // keyboard zoom anchor; reusing it means the readout follows the cursor
+    // with no second piece of pointer state to keep in sync.
+    const cursorTime = this.cursorX === undefined ? undefined : this.xToTime(this.cursorX)
+
+    const collapsed = this.registry.get(memoryCollapsedAtom)
+    drawMemoryTrack({
+      ctx: this.ctx,
+      samples: traceStore.memory,
+      collapsed,
+      top,
+      height,
+      width: this.width,
+      timeToX: (time) => this.timeToX(time),
+      peak: traceStore.memoryPeak,
+      trough: traceStore.memoryTrough,
+      rssPeak: traceStore.memoryRssPeak,
+      traceEnd: this.total(),
+      cursorTime,
+    })
+
+    // Readout at the cursor: the value at that instant, drawn on the canvas
+    // rather than in the DOM tooltip, so the track owns its whole surface and
+    // does not need the flame chart's React tree to know it exists.
+    if (collapsed || cursorTime === undefined) return
+    const sample = sampleAt(traceStore.memory, cursorTime)
+    if (sample === undefined) return
+    const ctx = this.ctx
+    ctx.save()
+    const x = Math.round(this.timeToX(sample.time)) + 0.5
+    ctx.strokeStyle = '#737373'
+    ctx.beginPath()
+    ctx.moveTo(x, top)
+    ctx.lineTo(x, top + height)
+    ctx.stroke()
+
+    const label = `heap ${formatBytes(sample.heapUsed)} · rss ${formatBytes(sample.rss)}`
+    ctx.textAlign = 'left'
+    const textWidth = ctx.measureText(label).width
+    // Flip left of the cursor near the right edge, so the readout never runs
+    // off the canvas on the last few percent of a trace.
+    const labelX = x + 6 + textWidth > this.width ? x - 6 - textWidth : x + 6
+    ctx.fillStyle = 'rgba(10,10,10,0.85)'
+    ctx.fillRect(labelX - 3, top + height - 16, textWidth + 6, 12)
+    ctx.fillStyle = '#d4d4d4'
+    ctx.fillText(label, labelX, top + height - 10)
+    ctx.restore()
   }
 
   private drawBars(

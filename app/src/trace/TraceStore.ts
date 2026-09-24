@@ -77,6 +77,22 @@ export interface TraceLog {
   readonly annotations: Attributes
 }
 
+/**
+ * One `process.memoryUsage()` reading, in the chart's time base.
+ *
+ * Figures stay in bytes; the track formats them. `time` is relative millis like
+ * everything else here, so the memory curve and the flame bars share an x-axis
+ * by construction rather than by two pieces of code agreeing.
+ */
+export interface TraceMemorySample {
+  /** Milliseconds since {@link TraceStore.origin}. */
+  readonly time: number
+  readonly heapUsed: number
+  readonly heapTotal: number
+  readonly rss: number
+  readonly external: number
+}
+
 /** Cheap counters for the header, so the UI never walks the span map to count. */
 export interface TraceStats {
   readonly spans: number
@@ -117,6 +133,29 @@ export class TraceStore {
   readonly openSpans = new Set<string>()
   /** Logs in arrival order. */
   readonly logs: Array<TraceLog> = []
+
+  /**
+   * Memory samples in arrival order, which is also time order.
+   *
+   * A plain array rather than anything indexed: the track draws the whole
+   * series each frame by walking it once, and at the client's 100ms interval a
+   * ten-minute trace is 6,000 entries — a scan the renderer does not notice.
+   * ponytail: linear scan, swap for a binary search into the viewport if a
+   * trace ever runs long enough for it to show up in a frame budget.
+   */
+  readonly memory: Array<TraceMemorySample> = []
+
+  /**
+   * Largest `heapUsed` seen — the memory track's y-axis top, kept here so the
+   * renderer never re-scans the series to scale a frame.
+   */
+  memoryPeak = 0
+
+  /** Smallest `heapUsed` seen — the memory track's y-axis floor. */
+  memoryTrough = Number.POSITIVE_INFINITY
+
+  /** Largest `rss` seen; the secondary line has its own scale. */
+  memoryRssPeak = 0
 
   /**
    * Every message ingested, in arrival order — the source for saving to a file.
@@ -186,6 +225,10 @@ export class TraceStore {
     this.roots.length = 0
     this.openSpans.clear()
     this.logs.length = 0
+    this.memory.length = 0
+    this.memoryPeak = 0
+    this.memoryTrough = Number.POSITIVE_INFINITY
+    this.memoryRssPeak = 0
     this.raw.length = 0
     this.rows.length = 0
     this.pendingChildren.clear()
@@ -221,6 +264,10 @@ export class TraceStore {
       }
       case 'Log': {
         this.applyLog(message)
+        break
+      }
+      case 'MemorySample': {
+        this.applyMemorySample(message)
         break
       }
       default:
@@ -374,6 +421,19 @@ export class TraceStore {
       attributes: message.attributes,
     })
     this.eventCount++
+  }
+
+  private applyMemorySample(message: Extract<ClientMessage, { _tag: 'MemorySample' }>): void {
+    this.memory.push({
+      time: this.relative(message.time),
+      heapUsed: message.heapUsed,
+      heapTotal: message.heapTotal,
+      rss: message.rss,
+      external: message.external,
+    })
+    if (message.heapUsed > this.memoryPeak) this.memoryPeak = message.heapUsed
+    if (message.heapUsed < this.memoryTrough) this.memoryTrough = message.heapUsed
+    if (message.rss > this.memoryRssPeak) this.memoryRssPeak = message.rss
   }
 
   private applyLog(message: Extract<ClientMessage, { _tag: 'Log' }>): void {

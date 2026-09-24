@@ -23,6 +23,9 @@ const defaultBufferSize = 8192
 /** How often a `Ping` is sent, so the collector can see a quiet program is alive. */
 const pingInterval = Duration.seconds(3)
 
+/** How often `process.memoryUsage()` is sampled, unless told otherwise. */
+const defaultMemoryIntervalMillis = 100
+
 /**
  * How long shutdown waits for queued messages to reach the collector.
  *
@@ -56,6 +59,14 @@ export interface Options {
   readonly programName?: string | undefined
   /** Outbound queue capacity, in messages. Defaults to 8192. */
   readonly bufferSize?: number | undefined
+  /**
+   * How often to sample `process.memoryUsage()`, in milliseconds. Defaults to
+   * 100. Set to `0` to record no memory at all.
+   *
+   * Ignored in a runtime without `process.memoryUsage` — a browser or an edge
+   * worker records nothing and says nothing about it.
+   */
+  readonly memoryIntervalMillis?: number | undefined
 }
 
 /**
@@ -78,6 +89,64 @@ const runtimeName = (): string => {
   if (versions?.node !== undefined) return `node ${versions.node}`
   return 'unknown'
 }
+
+/**
+ * `process.memoryUsage`, or `undefined` in a runtime that has no such thing.
+ *
+ * Resolved once, at layer construction: the check is a property read, but doing
+ * it per sample would be a property read on the host program's hot path for a
+ * value that cannot change. A browser, Deno without `--allow-*`, or a Workers
+ * runtime lands on `undefined` and simply never samples — silently, forever,
+ * which is the whole contract here.
+ */
+const memoryUsage = (): (() => NodeJS.MemoryUsage) | undefined => {
+  const usage = globalThis.process?.memoryUsage
+  return typeof usage === 'function' ? usage.bind(globalThis.process) : undefined
+}
+
+/**
+ * Forks the fiber that samples process memory into the outbound queue.
+ *
+ * Deliberately the same shape as the `Ping` fiber: a delayed `forever` forked
+ * into the client's scope, so it dies with the layer and cannot keep a program
+ * alive past its own exit. Sampling rides `sendUnsafe` like everything else, so
+ * a full queue drops a sample rather than pushing back on the host — a gap in a
+ * memory curve is a far cheaper failure than a stalled program.
+ *
+ * Returns `void` and forks nothing when the runtime has no `process.memoryUsage`
+ * or the interval is not a positive number.
+ */
+const forkMemorySampler = (deps: {
+  readonly sendUnsafe: (message: Protocol.ClientMessage) => void
+  readonly sessionId: Protocol.SessionId
+  readonly intervalMillis: number
+}): Effect.Effect<void, never, Scope.Scope> =>
+  Effect.suspend(() => {
+    const usage = memoryUsage()
+    if (usage === undefined || !(deps.intervalMillis > 0)) return Effect.void
+    const sample = Effect.clockWith((clock) =>
+      Effect.sync(() => {
+        const memory = usage()
+        deps.sendUnsafe({
+          _tag: 'MemorySample',
+          sessionId: deps.sessionId,
+          time: clock.currentTimeNanosUnsafe(),
+          // Rounded because the protocol's `Natural` rejects a fraction, and
+          // `rss` on some platforms is not an integer.
+          heapUsed: Math.round(memory.heapUsed),
+          heapTotal: Math.round(memory.heapTotal),
+          rss: Math.round(memory.rss),
+          external: Math.round(memory.external),
+        })
+      }),
+    )
+    return sample.pipe(
+      Effect.delay(Duration.millis(deps.intervalMillis)),
+      Effect.forever,
+      Effect.forkScoped,
+      Effect.asVoid,
+    )
+  })
 
 /**
  * Builds the client service and forks the fiber that owns the connection.
@@ -156,6 +225,12 @@ export const make = (
     yield* connection({ socket, queue, sessionId, hello, reportDropped, flushed }).pipe(
       Effect.forkScoped,
     )
+
+    yield* forkMemorySampler({
+      sendUnsafe,
+      sessionId,
+      intervalMillis: options?.memoryIntervalMillis ?? defaultMemoryIntervalMillis,
+    })
 
     // A short program can finish before the socket has even opened, and closing
     // the scope would otherwise interrupt the connection fiber mid-flight and

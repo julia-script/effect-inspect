@@ -241,6 +241,60 @@ describe('Inspect.layer', () => {
     expect(logs[1]?.annotations['key']).toBe('value')
   })
 
+  it('samples process memory on an interval', async () => {
+    const { messages } = await withCollector(Effect.sleep('250 millis'), {
+      memoryIntervalMillis: 20,
+    })
+
+    const samples = messages.filter((message) => message._tag === 'MemorySample')
+    // A 250ms run at 20ms should see ~12; assert only that several arrived, so
+    // a loaded CI machine does not flake the suite.
+    expect(samples.length).toBeGreaterThan(2)
+    for (const sample of samples) {
+      expect(sample.heapUsed).toBeGreaterThan(0)
+      // Not asserted against `heapUsed`: Bun reports the two from separate
+      // reads of the JS heap and `heapTotal` can come back the smaller of the
+      // pair. Both are reported as the runtime gives them.
+      expect(sample.heapTotal).toBeGreaterThan(0)
+      expect(sample.rss).toBeGreaterThan(0)
+      expect(sample.external).toBeGreaterThanOrEqual(0)
+      expect(Number.isInteger(sample.heapUsed)).toBe(true)
+    }
+    // Times share the span clock's monotonic base, so they are strictly rising.
+    const times = samples.map((sample) => sample.time)
+    expect([...times].sort((a, b) => (a < b ? -1 : 1))).toStrictEqual(times)
+  })
+
+  it('records nothing when the interval is zero', async () => {
+    const { messages } = await withCollector(Effect.sleep('150 millis'), {
+      memoryIntervalMillis: 0,
+    })
+    expect(messages.some((message) => message._tag === 'MemorySample')).toBe(false)
+  })
+
+  it('records nothing, and still runs, in a runtime without process.memoryUsage', async () => {
+    // The real guard, exercised the only way it can be: by taking the API away.
+    // `process` is shared, so it is restored in a `finally`.
+    const original = process.memoryUsage
+    // oxlint-disable-next-line typescript/no-explicit-any
+    delete (process as any).memoryUsage
+    try {
+      const { messages, value } = await withCollector(
+        Effect.succeed('ran').pipe(
+          Effect.withSpan('no-memory-api'),
+          Effect.tap(() => Effect.sleep('150 millis')),
+        ),
+        { memoryIntervalMillis: 10 },
+      )
+      expect(value).toBe('ran')
+      // The program is traced exactly as it would have been, minus the memory.
+      expect(messages.some((message) => message._tag === 'SpanStart')).toBe(true)
+      expect(messages.some((message) => message._tag === 'MemorySample')).toBe(false)
+    } finally {
+      process.memoryUsage = original
+    }
+  })
+
   it('drops the oldest messages instead of growing without bound', async () => {
     const { messages } = await withCollector(
       // A queue far smaller than the burst, so the overflow path is forced.

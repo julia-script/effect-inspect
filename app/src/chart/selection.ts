@@ -31,3 +31,13 @@ export const filterHidesAtom = Atom.make(false)
  */
 export const matches = (name: string, filter: string): boolean =>
   filter === '' || name.toLowerCase().includes(filter)
+
+/**
+ * Whether the memory track is collapsed away.
+ *
+ * Lives here rather than in the renderer because the toggle is DOM chrome and
+ * the track is canvas; an atom is the seam they already share. Collapsed means
+ * the track takes zero height, which is the same thing a session with no
+ * samples gets — so there is only one "no track" code path.
+ */
+export const memoryCollapsedAtom = Atom.make(false)

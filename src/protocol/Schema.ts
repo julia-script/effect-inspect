@@ -286,6 +286,25 @@ export const FiberEvent = Schema.Struct({
 })
 export type FiberEvent = Schema.Schema.Type<typeof FiberEvent>
 
+/**
+ * A `process.memoryUsage()` reading, sampled on an interval by the client.
+ *
+ * Node and Bun only: a runtime without `process.memoryUsage` emits none of
+ * these and a session simply has no memory track. Figures are bytes, as the
+ * runtime reports them; `time` shares the monotonic base of span times, so the
+ * webapp can draw the curve against the same x-axis as the flame chart.
+ */
+export const MemorySample = Schema.Struct({
+  _tag: Schema.tag('MemorySample'),
+  ...sessionId,
+  time: Timestamp,
+  heapUsed: Schema.Natural,
+  heapTotal: Schema.Natural,
+  rss: Schema.Natural,
+  external: Schema.Natural,
+})
+export type MemorySample = Schema.Schema.Type<typeof MemorySample>
+
 export const Ping = Schema.Struct({
   _tag: Schema.tag('Ping'),
   ...sessionId,
@@ -313,6 +332,7 @@ export const ClientMessage = Schema.Union([
   Log,
   Metrics,
   FiberEvent,
+  MemorySample,
   Ping,
 ])
 export type ClientMessage = Schema.Schema.Type<typeof ClientMessage>

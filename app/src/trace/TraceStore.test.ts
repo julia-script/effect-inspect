@@ -46,6 +46,16 @@ const end = (
   attributes,
 })
 
+const memory = (at: number, heapUsed: number): ClientMessage => ({
+  _tag: 'MemorySample',
+  sessionId: 's',
+  time: ms(at),
+  heapUsed,
+  heapTotal: heapUsed * 2,
+  rss: heapUsed * 3,
+  external: 16,
+})
+
 describe('TraceStore', () => {
   it('nests spans and assigns depth and rows', () => {
     const store = new TraceStore()
@@ -166,6 +176,53 @@ describe('TraceStore', () => {
     expect(store.logs).toHaveLength(1)
     expect(store.logs[0]!.time).toBe(4)
     expect(store.stats().events).toBe(1)
+  })
+
+  it('records memory samples in the span time base and tracks the peak', () => {
+    const store = new TraceStore()
+    store.applyAll([hello(), start('a', 0), memory(10, 100), memory(20, 400), memory(30, 250)])
+
+    expect(store.memory.map((sample) => sample.time)).toEqual([10, 20, 30])
+    expect(store.memory.map((sample) => sample.heapUsed)).toEqual([100, 400, 250])
+    // The heap peak is the track's y-axis; `rss` is tracked separately because
+    // it is typically an order of magnitude larger and has its own scale.
+    expect(store.memoryPeak).toBe(400)
+    expect(store.memoryTrough).toBe(100)
+    expect(store.memoryRssPeak).toBe(1200)
+    expect(store.memory[0]).toMatchObject({ heapTotal: 200, rss: 300, external: 16 })
+  })
+
+  it('extends the trace duration so a sample past the last span is still drawable', () => {
+    const store = new TraceStore()
+    store.applyAll([hello(), start('a', 0), end('a', 5), memory(40, 100)])
+    expect(store.stats().duration).toBe(40)
+  })
+
+  it('has no memory series for a trace that carries no samples', () => {
+    const store = new TraceStore()
+    store.applyAll([hello(), start('a', 0), end('a', 5)])
+    // The "absent entirely" case the track keys on.
+    expect(store.memory).toEqual([])
+    expect(store.memoryPeak).toBe(0)
+    expect(store.memoryRssPeak).toBe(0)
+    // Never read while the series is empty — the track returns before it scales.
+    expect(store.memoryTrough).toBe(Number.POSITIVE_INFINITY)
+  })
+
+  it('drops the memory series on clear', () => {
+    const store = new TraceStore()
+    store.applyAll([hello(), memory(10, 100)])
+    store.clear()
+    expect(store.memory).toEqual([])
+    expect(store.memoryPeak).toBe(0)
+    expect(store.memoryTrough).toBe(Number.POSITIVE_INFINITY)
+    expect(store.memoryRssPeak).toBe(0)
+  })
+
+  it('keeps memory samples in raw, so a saved trace carries them', () => {
+    const store = new TraceStore()
+    store.applyAll([hello(), memory(10, 100)])
+    expect(store.raw.filter((message) => message._tag === 'MemorySample')).toHaveLength(1)
   })
 
   it('collapses a batch into a single version bump and clears', () => {
