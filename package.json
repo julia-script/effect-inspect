@@ -21,10 +21,16 @@
     "prepare": "effect-tsgo patch --oxlint",
     "build": "tsc",
     "dev": "tsc --watch --preserveWatchOutput",
-    "typecheck": "tsc --noEmit && tsc --noEmit -p app/tsconfig.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p app/tsconfig.json && tsc --noEmit -p examples/tsconfig.json",
     "dev:app": "vite dev --config app/vite.config.ts",
     "build:app": "vite build --config app/vite.config.ts",
-    "stub:collector": "bun run app/stub-collector.ts"
+    "stub:collector": "bun run app/stub-collector.ts",
+    "example:webapp": "bun run examples/webapp.ts",
+    "example:concurrent": "bun run examples/concurrent.ts",
+    "example:deep": "bun run examples/deep.ts",
+    "example:failing": "bun run examples/failing.ts",
+    "example:slow": "bun run examples/slow.ts",
+    "example:firehose": "bun run examples/firehose.ts"
   },
   "dependencies": {
     "@effect/atom-react": "4.0.0-rc.117",

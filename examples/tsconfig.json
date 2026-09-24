@@ -1,0 +1,12 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    // The examples import the client from `../src`, so the root of the program
+    // is the repo, not `examples/`. Nothing is emitted from here.
+    "rootDir": "..",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["."]
+}
