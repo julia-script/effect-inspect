@@ -1,0 +1,57 @@
+name: Release
+
+# Publication is triggered only by the successful CI run for this exact main
+# commit. npm authenticates this workflow through OIDC trusted publishing.
+on:
+  workflow_run:
+    workflows: [CI]
+    branches: [main]
+    types: [completed]
+
+concurrency: release-${{ github.event.workflow_run.head_sha }}
+
+permissions:
+  contents: write
+  id-token: write
+  pull-requests: write
+
+jobs:
+  release:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    # Keep the npm OIDC environment identity; configure it without required reviewers.
+    environment: npm-production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Verify exact gated commit
+        env:
+          GATED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: test "$(git rev-parse HEAD)" = "$GATED_SHA"
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install npm with trusted-publishing support
+        run: npm install --global npm@^11.15.0
+
+      - run: bun install --frozen-lockfile
+
+      # With pending changesets this opens/updates the version PR. Once that PR
+      # is merged, changesets publishes through npm's GitHub OIDC exchange.
+      - name: Create release PR or publish gated package
+        uses: changesets/action@v1
+        with:
+          version: bun run version:packages
+          publish: bun run release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: 'true'

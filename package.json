@@ -33,6 +33,8 @@
     "check": "oxfmt --check . && oxlint --disable-nested-config . && bun run typecheck",
     "test": "bun test src app",
     "check:write": "oxfmt --write . && oxlint --disable-nested-config --fix .",
+    "version:packages": "changeset version",
+    "release": "bun run build && changeset publish",
     "prepare": "effect-tsgo patch --oxlint",
     "build": "rm -rf dist && tsc -p tsconfig.build.json && bun run build:app",
     "dev": "tsc --watch --preserveWatchOutput",
