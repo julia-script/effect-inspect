@@ -1,16 +1,26 @@
 /**
  * The bottom tabbed drawer.
  *
- * M1 ships one tab (Event log); the tab strip exists because the spec's
- * milestone-2 tabs (Summary, Bottom-up, Call tree) drop straight into it, and
- * a single-tab strip is a handful of lines rather than an abstraction.
+ * Four tabs over one trace: the Event log is per span, the other three are
+ * aggregations of the visible range. Only the active tab is mounted, so a
+ * closed Summary costs nothing — the aggregation is built by the tab, not by
+ * the drawer.
  */
 import { useState } from 'react'
+import { BottomUp, CallTree, Summary } from './Aggregation.tsx'
 import { EventLog } from './EventLog.tsx'
+
+const TABS = [
+  { id: 'log', label: 'Event log', render: () => <EventLog /> },
+  { id: 'summary', label: 'Summary', render: () => <Summary /> },
+  { id: 'bottom-up', label: 'Bottom-up', render: () => <BottomUp /> },
+  { id: 'call-tree', label: 'Call tree', render: () => <CallTree /> },
+] as const
 
 export const Drawer = () => {
   const [height, setHeight] = useState(220)
   const [collapsed, setCollapsed] = useState(false)
+  const [active, setActive] = useState<(typeof TABS)[number]['id']>('log')
 
   /** Drag the top edge to resize. Pointer capture so it survives leaving the bar. */
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -37,9 +47,25 @@ export const Drawer = () => {
         onPointerDown={collapsed ? undefined : onPointerDown}
         className={`flex items-center gap-3 px-3 ${collapsed ? '' : 'cursor-row-resize'}`}
       >
-        <span className="border-b border-neutral-400 py-1.5 text-[11px] text-neutral-200">
-          Event log
-        </span>
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            // The bar above captures the pointer to drive its resize drag,
+            // which redirects the pointerup and kills the click on anything
+            // inside it. Stopping the pointerdown here keeps the tabs
+            // clickable without the bar losing its drag elsewhere.
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={() => setActive(tab.id)}
+            className={`border-b py-1.5 text-[11px] ${
+              tab.id === active
+                ? 'border-neutral-400 text-neutral-200'
+                : 'border-transparent text-neutral-600 hover:text-neutral-400'
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
         <button
           type="button"
           onClick={() => setCollapsed((value) => !value)}
@@ -48,7 +74,7 @@ export const Drawer = () => {
           {collapsed ? 'expand' : 'collapse'}
         </button>
       </div>
-      {!collapsed && <EventLog />}
+      {!collapsed && TABS.find((tab) => tab.id === active)!.render()}
     </div>
   )
 }

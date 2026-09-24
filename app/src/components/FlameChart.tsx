@@ -7,10 +7,13 @@
  * both of which are cheap and genuinely better as DOM than as canvas text.
  */
 import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
-import { useContext, useEffect, useRef, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { FlameRenderer } from '../chart/Renderer.ts'
+import { Shortcuts } from './Shortcuts.tsx'
+import { useKeyboard } from './useKeyboard.ts'
+import type { Viewport } from '../chart/Viewport.ts'
 import { filterAtom, filterHidesAtom, hoveredSpanIdAtom } from '../chart/selection.ts'
-import { spanEnd } from '../chart/Layout.ts'
+import { timings } from '../chart/metrics.ts'
 import { traceStore } from '../state/atoms.ts'
 import { formatDuration, formatValue } from './format.ts'
 
@@ -34,13 +37,7 @@ const Tooltip = ({
   if (hit === undefined || hit.span.spanId !== hoveredId) return null
 
   const span = hit.span
-  const now = traceStore.stats().duration
-  const total = spanEnd(span, now) - span.start
-  const childTime = span.children.reduce((sum, id) => {
-    const child = traceStore.spans.get(id)
-    if (child === undefined) return sum
-    return sum + (spanEnd(child, now) - child.start)
-  }, 0)
+  const { total, self } = timings(traceStore, span, traceStore.stats().duration)
   const attributes = Object.entries(span.attributes).slice(0, 6)
 
   // Flip to the left of the cursor when a right-edge bar would overflow.
@@ -56,9 +53,7 @@ const Tooltip = ({
         <dt>total</dt>
         <dd className="text-right tabular-nums text-neutral-300">{formatDuration(total)}</dd>
         <dt>self</dt>
-        <dd className="text-right tabular-nums text-neutral-300">
-          {formatDuration(Math.max(total - childTime, 0))}
-        </dd>
+        <dd className="text-right tabular-nums text-neutral-300">{formatDuration(self)}</dd>
         <dt>start</dt>
         <dd className="text-right tabular-nums text-neutral-400">{formatDuration(span.start)}</dd>
       </dl>
@@ -82,7 +77,13 @@ const Tooltip = ({
 }
 
 /** Filter box and view controls; writes the shared filter atoms. */
-const Toolbar = ({ onReset }: { readonly onReset: () => void }) => {
+const Toolbar = ({
+  onReset,
+  onShowHelp,
+}: {
+  readonly onReset: () => void
+  readonly onShowHelp: () => void
+}) => {
   const [filter, setFilter] = useAtom(filterAtom)
   const [hides, setHides] = useAtom(filterHidesAtom)
 
@@ -111,9 +112,15 @@ const Toolbar = ({ onReset }: { readonly onReset: () => void }) => {
       >
         reset zoom
       </button>
-      <span className="text-[11px] text-neutral-700">
-        drag to pan · wheel to zoom · alt-wheel to scroll rows
-      </span>
+      <button
+        type="button"
+        onClick={onShowHelp}
+        aria-label="Keyboard shortcuts"
+        className="rounded-sm px-2 py-1 text-[11px] text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300"
+      >
+        ? keys
+      </button>
+      <span className="text-[11px] text-neutral-700">drag to pan · wheel to zoom · W/A/S/D</span>
     </div>
   )
 }
@@ -126,6 +133,7 @@ export const FlameChart = () => {
   // `hovered()` on it; the chart's draw path never reads React.
   const [renderer, setRenderer] = useState<FlameRenderer>()
   const [width, setWidth] = useState(0)
+  const [helpOpen, setHelpOpen] = useState(false)
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -165,12 +173,19 @@ export const FlameChart = () => {
     }
   }, [renderer])
 
+  // `useCallback` because the key hook takes it as a dependency; an inline
+  // arrow would re-bind the listener on every render.
+  const showHelp = useCallback(() => setHelpOpen(true), [])
+  const closeHelp = useCallback(() => setHelpOpen(false), [])
+  useKeyboard(showHelp, closeHelp, helpOpen)
+
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <Toolbar onReset={() => renderer?.resetView()} />
+      <Toolbar onReset={() => renderer?.resetView()} onShowHelp={showHelp} />
       <div ref={containerRef} className="relative min-h-0 flex-1">
         <canvas ref={canvasRef} className="absolute inset-0 size-full touch-none" />
         <Tooltip renderer={renderer} containerWidth={width} />
+        {helpOpen && <Shortcuts onClose={closeHelp} />}
       </div>
     </div>
   )
@@ -181,3 +196,23 @@ let activeRenderer: FlameRenderer | undefined
 
 /** Centres the chart on a span. No-op when the chart is not mounted. */
 export const revealSpan = (spanId: string): void => activeRenderer?.revealSpan(spanId)
+
+/**
+ * The mounted renderer, for the keyboard bindings.
+ *
+ * Same module-level handle `revealSpan` already uses, exposed because the key
+ * handler needs several of the renderer's transitions rather than one, and
+ * wrapping each in its own free function would be five of these.
+ */
+export const activeChart = (): FlameRenderer | undefined => activeRenderer
+
+/**
+ * The chart's current time window, or `undefined` when no chart is mounted.
+ *
+ * Read by the drawer's aggregation tabs, which follow the visible range the
+ * way Chrome does. They **poll** this on a settle timer rather than being
+ * pushed every viewport change: the viewport moves once per pan frame and
+ * aggregating 13k spans at that rate would stutter, so the drawer samples a
+ * settled window instead of subscribing to a moving one.
+ */
+export const chartViewport = (): Viewport | undefined => activeRenderer?.viewport()
