@@ -22,8 +22,17 @@ export const Drawer = () => {
   const [collapsed, setCollapsed] = useState(false)
   const [active, setActive] = useState<(typeof TABS)[number]['id']>('log')
 
-  /** Drag the top edge to resize. Pointer capture so it survives leaving the bar. */
+  /**
+   * Drag the top edge to resize. Pointer capture so it survives leaving the bar.
+   *
+   * Capturing redirects the `pointerup` to the bar, so no `click` ever fires on
+   * a control inside it. The guard therefore lives **here**, on the bar, rather
+   * than as a `stopPropagation` on each child: a drag only starts when the
+   * pointer landed on the bar itself, so every button in the bar — present and
+   * future — stays clickable without having to remember to opt out.
+   */
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return
     event.currentTarget.setPointerCapture(event.pointerId)
     const startY = event.clientY
     const startHeight = height
@@ -51,11 +60,6 @@ export const Drawer = () => {
           <button
             key={tab.id}
             type="button"
-            // The bar above captures the pointer to drive its resize drag,
-            // which redirects the pointerup and kills the click on anything
-            // inside it. Stopping the pointerdown here keeps the tabs
-            // clickable without the bar losing its drag elsewhere.
-            onPointerDown={(event) => event.stopPropagation()}
             onClick={() => setActive(tab.id)}
             className={`border-b py-1.5 text-[11px] ${
               tab.id === active

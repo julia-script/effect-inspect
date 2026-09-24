@@ -19,6 +19,7 @@ import {
   filterHidesAtom,
   hoveredSpanIdAtom,
   matches,
+  memoryCollapsedAtom,
   selectedSpanIdAtom,
 } from './selection.ts'
 import { clamp, isFull, pan, type Viewport, zoom } from './Viewport.ts'
@@ -29,7 +30,6 @@ import {
   sampleAt,
   trackHeight,
 } from './MemoryTrack.ts'
-import { memoryCollapsedAtom } from './selection.ts'
 
 /** Height of the whole-trace overview strip, in CSS pixels. */
 const OVERVIEW_HEIGHT = 34
@@ -60,11 +60,6 @@ const COLOR_SELECTED = '#fafafa'
  */
 const DEPTH_FILL = ['#3f3f46', '#52525b', '#34343a', '#45454d', '#2e2e33']
 
-export interface RendererCallbacks {
-  /** Called when the viewport changes, so the chrome can show the window. */
-  readonly onViewportChange?: (view: Viewport) => void
-}
-
 /** Where a pointer landed, in chart coordinates. */
 interface Hit {
   readonly span: TraceSpan
@@ -91,7 +86,7 @@ export class FlameRenderer {
   /** Last pointer x while the cursor is over the canvas — the keyboard zoom anchor. */
   private cursorX: number | undefined
   private drag: { readonly x: number; readonly view: Viewport } | undefined
-  private overviewDrag: 'window' | 'edge' | undefined
+  private overviewDrag = false
   private overviewGrab = 0
   private readonly unsubscribes: Array<() => void> = []
   private readonly observer: ResizeObserver
@@ -99,7 +94,6 @@ export class FlameRenderer {
   constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly registry: AtomRegistry,
-    private readonly callbacks: RendererCallbacks = {},
   ) {
     const ctx = canvas.getContext('2d', { alpha: false })
     if (ctx === null) throw new Error('2d canvas context unavailable')
@@ -249,7 +243,6 @@ export class FlameRenderer {
   private setView(next: Viewport): void {
     this.view = next
     this.following = isFull(next, this.total())
-    this.callbacks.onViewportChange?.(next)
     this.invalidate()
   }
 
@@ -279,7 +272,6 @@ export class FlameRenderer {
       const total = this.total()
       if (this.view.from !== 0 || this.view.to !== total) {
         this.view = { from: 0, to: total }
-        this.callbacks.onViewportChange?.(this.view)
         this.dirty = true
       }
     }
@@ -355,12 +347,12 @@ export class FlameRenderer {
       // Clicking inside the window drags it; clicking outside jumps to that
       // point, keeping the window width — same as Chrome's overview.
       if (x >= left && x <= right) {
-        this.overviewDrag = 'window'
+        this.overviewDrag = true
         this.overviewGrab = x - left
       } else {
         const width = this.view.to - this.view.from
         const centre = (x / this.width) * total
-        this.overviewDrag = 'window'
+        this.overviewDrag = true
         this.overviewGrab = ((width / total) * this.width) / 2
         this.setView(clamp({ from: centre - width / 2, to: centre + width / 2 }, total))
       }
@@ -392,7 +384,7 @@ export class FlameRenderer {
     const { x, y } = this.pointer(event)
     this.cursorX = x
 
-    if (this.overviewDrag !== undefined) {
+    if (this.overviewDrag) {
       const total = this.total()
       const width = this.view.to - this.view.from
       const from = ((x - this.overviewGrab) / this.width) * total
@@ -418,7 +410,7 @@ export class FlameRenderer {
   private onPointerUp = (event: PointerEvent): void => {
     this.canvas.releasePointerCapture(event.pointerId)
     this.drag = undefined
-    this.overviewDrag = undefined
+    this.overviewDrag = false
   }
 
   private onPointerLeave = (): void => {
