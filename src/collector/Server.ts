@@ -7,9 +7,9 @@
  * program that crashes mid-message, or a webapp client that disappears, cannot
  * take the collector down.
  */
-import { Effect, Fiber, Option, PubSub, Result } from 'effect'
-import { Socket, SocketServer } from 'effect/unstable/socket'
-import { ConnectionRequest } from './BunWebSocketServer.ts'
+import { Effect, Fiber, PubSub, Result } from 'effect'
+import { HttpServer, HttpServerRequest, HttpServerResponse } from 'effect/unstable/http'
+import { Socket } from 'effect/unstable/socket'
 import { clientCodec, collectorCodec, webappCodec, webappRequestCodec } from '../protocol/Codec.ts'
 import type * as Protocol from '../protocol/Schema.ts'
 import { Store } from './Store.ts'
@@ -201,34 +201,46 @@ const handleWebapp = Effect.fnUntraced(function* (socket: Socket.Socket) {
   )
 })
 
-/** The path a connection was opened on, or `undefined` when unavailable. */
-const requestPath = Effect.map(
-  Effect.serviceOption(ConnectionRequest),
-  Option.match({
-    onNone: () => undefined,
-    onSome: (request) => new URL(request.url).pathname,
-  }),
-)
-
 /**
  * Handles one accepted connection, routed by its request path.
  *
  * Scoped per connection: the writer and every fiber a handler forks are
  * released when that one connection ends, and nothing outlives it.
  */
-export const handleConnection = (socket: Socket.Socket): Effect.Effect<void, never, Store> =>
-  Effect.scoped(
-    Effect.flatMap(requestPath, (path) =>
-      path === webappPath ? handleWebapp(socket) : handleClient(socket),
-    ),
-  )
+export const handleConnection = (
+  socket: Socket.Socket,
+  path: string,
+): Effect.Effect<void, never, Store> =>
+  Effect.scoped(path === webappPath ? handleWebapp(socket) : handleClient(socket))
 
-/** Runs the collector until interrupted. */
-export const run: Effect.Effect<
-  never,
-  SocketServer.SocketServerError,
-  Store | SocketServer.SocketServer
-> = Effect.gen(function* () {
-  const server = yield* SocketServer.SocketServer
-  return yield* server.run(handleConnection)
-})
+/** Serves instrumented clients, webapp sockets, and the bundled web UI. */
+export const run = (fetch?: (request: Request) => Promise<Response>) =>
+  Effect.gen(function* () {
+    const server = yield* HttpServer.HttpServer
+    yield* server.serve(
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest
+        const path = new URL(request.url, 'http://localhost').pathname
+        if (request.headers.upgrade?.toLowerCase() === 'websocket') {
+          const socket = yield* request.upgrade
+          yield* handleConnection(socket, path)
+          return HttpServerResponse.empty()
+        }
+        if (fetch === undefined) {
+          return HttpServerResponse.text('effect-inspect collector: websocket only', {
+            status: 426,
+          })
+        }
+        const response = yield* Effect.promise(() =>
+          fetch(
+            new Request(new URL(request.url, 'http://localhost').href, {
+              method: request.method,
+              headers: request.headers,
+            }),
+          ),
+        )
+        return HttpServerResponse.fromWeb(response)
+      }),
+    )
+    return yield* Effect.never
+  })

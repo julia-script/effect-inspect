@@ -31,7 +31,11 @@ import { TraceStore } from '../trace/TraceStore.ts'
  * `VITE_COLLECTOR_URL` overrides it, so a second collector on a non-default
  * `EFFECT_INSPECT_PORT` can be inspected without editing source.
  */
-export const COLLECTOR_URL = import.meta.env.VITE_COLLECTOR_URL ?? 'ws://localhost:34437/webapp'
+export const COLLECTOR_URL =
+  import.meta.env.VITE_COLLECTOR_URL ??
+  (typeof window === 'undefined'
+    ? 'ws://localhost:34437/webapp'
+    : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/webapp`)
 
 /** Connection lifecycle, as rendered in the header. */
 export type ConnectionStatus =

@@ -3,8 +3,8 @@
 A performance inspector for Effect programs. Add one layer to your app, open
 localhost, and watch a live flame chart of its spans, events and logs.
 
-Three processes: your program dials out to a long-lived **collector**, and the
-**webapp** reads the trace back from it. The collector owns the history, so
+Your program dials out to a long-lived **collector**, and the **webapp** reads
+the trace back from it. The collector owns the history, so
 restarting your program does not lose the trace.
 
 The collector's history is in memory only, so restarting _the collector_ does
@@ -13,27 +13,27 @@ drop every trace it was holding. Save the ones you want to keep — see
 
 ## Quickstart
 
-```bash
-bun install
-```
-
-Then three terminals, in this order.
-
-**1. The collector** — leave it running.
+Install the package in an Effect project. The `effect-inspect` command runs on
+Node.js 22 or newer and does not require Bun. The library import works in a
+JavaScript runtime with a global `WebSocket` implementation.
 
 ```bash
-bun run collector
-# effect-inspect collector listening on ws://localhost:34437
+npm install effect-inspect effect
 ```
 
-**2. The webapp** — open the URL it prints.
+Start the collector and bundled webapp, then open the URL it prints:
 
 ```bash
-bun run dev:app
-# http://localhost:5173
+npx effect-inspect start
+# effect-inspect listening at http://localhost:34437
 ```
 
-**3. A program to look at.** Any of the examples will do:
+Run your instrumented program in another terminal. The collector listens for
+programs at `ws://localhost:34437/`. Run `npx effect-inspect --help` for
+command help or `npx effect-inspect start --help` for start options.
+
+When working from this repository, install its dependencies with `bun install`
+and run an example:
 
 ```bash
 bun run example:webapp
@@ -106,6 +106,11 @@ this while demoing.
 
 The collector serves both roles on one port, routed by path: programs dial
 `ws://localhost:34437/`, the webapp `ws://localhost:34437/webapp`.
+
+The installed command uses Node.js for its WebSocket server and bundled UI. The
+library's `Inspect.layer()` uses the runtime's global `WebSocket`; use
+`Inspect.layerWebSocket()` with a supplied Effect WebSocket constructor when
+that global is unavailable.
 
 ## Development
 
