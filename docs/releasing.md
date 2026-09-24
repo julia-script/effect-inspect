@@ -15,10 +15,13 @@ bun run test
 bun run build
 npm pack --dry-run
 npm login
+npm whoami
 npm publish --access public
 ```
 
 This first publish is the only publish that requires local npm authentication. Do not run the GitHub publish workflow until the npm trusted publisher is configured.
+
+Run `npm whoami` in the same terminal and with the same npm registry configuration as the publish command. If it returns `E401`, authenticate with `npm login` and repeat `npm whoami` before publishing. If the first publish returns `E404` for the registry `PUT`, check `npm config get registry` points to `https://registry.npmjs.org/` and repeat the identity check; an unauthenticated request can surface as `E404` during publication. If authentication succeeds, confirm that the package name is available and the signed-in account has publishing rights. Do not put npm credentials in this repository or the GitHub workflow.
 
 On npmjs.com, open **effect-inspect → Settings → Trusted publishing**, choose **GitHub Actions**, and enter:
 
