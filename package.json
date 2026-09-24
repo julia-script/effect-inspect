@@ -13,24 +13,42 @@
   },
   "scripts": {
     "lint": "oxlint --disable-nested-config .",
+    "collector": "bun run src/collector/main.ts",
     "format": "oxfmt --write .",
     "check": "oxfmt --check . && oxlint --disable-nested-config . && bun run typecheck",
-    "test": "bun test src",
+    "test": "bun test src app",
     "check:write": "oxfmt --write . && oxlint --disable-nested-config --fix .",
     "prepare": "effect-tsgo patch --oxlint",
     "build": "tsc",
     "dev": "tsc --watch --preserveWatchOutput",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p app/tsconfig.json",
+    "dev:app": "vite dev --config app/vite.config.ts",
+    "build:app": "vite build --config app/vite.config.ts",
+    "stub:collector": "bun run app/stub-collector.ts"
   },
   "dependencies": {
-    "effect": "4.0.0-rc.117"
+    "@effect/atom-react": "4.0.0-rc.117",
+    "@effect/platform-bun": "4.0.0-rc.117",
+    "@tanstack/react-router": "^1.170.39",
+    "@tanstack/react-start": "^1.168.58",
+    "effect": "4.0.0-rc.117",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "scheduler": "0.27.0"
   },
   "devDependencies": {
     "@effect/tsgo": "0.45.0",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "1.4.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.1",
     "oxfmt": "0.70.0",
     "oxlint": "1.82.0",
     "oxlint-tsgolint": "7.0.2001",
-    "typescript": "7.0.2"
+    "playwright-core": "^1.63.0",
+    "tailwindcss": "^4.3.3",
+    "typescript": "7.0.2",
+    "vite": "^8.3.0"
   }
 }

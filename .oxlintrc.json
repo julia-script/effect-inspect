@@ -7,5 +7,16 @@
   },
   "rules": {
     "no-nested-ternary": "error"
-  }
+  },
+  "overrides": [
+    {
+      "files": ["app/**"],
+      "rules": {
+        "effecttsgo/global-console": "off",
+        "effecttsgo/global-date": "off",
+        "effecttsgo/global-random": "off",
+        "effecttsgo/global-timers": "off"
+      }
+    }
+  ]
 }

@@ -1,0 +1,6 @@
+@import 'tailwindcss';
+
+/* Visual direction: near-black, monospace, grayscale. See the spec. */
+:root {
+  color-scheme: dark;
+}

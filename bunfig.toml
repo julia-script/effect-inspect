@@ -1,3 +1,5 @@
 [test]
-# ponytail: keeps bare `bun test` out of the vendored read-only repos/ tree
-root = "src"
+# ponytail: keeps bare `bun test` out of the vendored read-only repos/ tree.
+# Was `root = "src"`, but tests now live in both src/ and app/ and `root` takes
+# a single dir; ignoring the vendored tree directly covers both.
+pathIgnorePatterns = ["**/repos/**"]
