@@ -1,143 +1,89 @@
-@import 'tailwindcss';
+/*
+ * Beautiful UI's `foundation.css` is the single token vocabulary for the app.
+ *
+ * It carries both `:root` (light) and `.dark` token sets, the `@theme inline`
+ * mapping that turns them into Tailwind utilities, `@custom-variant dark`,
+ * layered shadow tokens and the focus-visible ring — so everything the chrome
+ * needs comes from one file, and the canvas reads the same custom properties
+ * off the document element.
+ *
+ * It imports `tailwindcss` and `shadow-plugin/unprefixed` itself, which is why
+ * this file has no `@import 'tailwindcss'` of its own.
+ */
+@import './beautifui/foundation.css';
 
 /*
- * Visual direction: near-black, monospace, grayscale with one restrained
- * accent. See the spec.
+ * Two overrides of foundation's defaults, and nothing else.
  *
- * Grayscale is a true neutral ramp (no hue), so the canvas — which paints its
- * own hex constants — can sit next to the DOM chrome without a temperature
- * mismatch. The single accent is a desaturated blue (hue 235), muted enough to
- * read as chrome rather than decoration; it carries selection, focus rings and
- * primary actions and nothing else.
- *
- * Dark is the default and keeps the existing near-black character: the dark
- * `--background` is oklch(0.145 0 0) ≈ #0a0a0a, the value `Renderer.ts` and
- * `MemoryTrack.ts` already paint.
+ * 1. The app is a full-bleed inspector, not a document: the shell paints every
+ *    pixel, so foundation's diagonal stripe wallpaper is never visible and
+ *    only costs a repeating-gradient repaint on every scroll. `--page` is the
+ *    surface the shell actually sits on.
+ * 2. This is a profiler. Numbers, span names and timings line up in columns,
+ *    so monospace is the body face; foundation's sans stays available as
+ *    `font-sans` for prose-ish chrome labels.
  */
-
-:root {
-  color-scheme: dark;
-
-  --radius: 0.5rem;
-
-  /* Light — paper white, not pure white, so elevated cards can be brighter. */
-  --background: oklch(0.985 0 0); /* #fafafa */
-  --foreground: oklch(0.205 0 0); /* #262626 */
-
-  --card: oklch(1 0 0); /* #ffffff */
-  --card-foreground: oklch(0.205 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.205 0 0);
-
-  --primary: oklch(0.55 0.1 235);
-  --primary-foreground: oklch(0.985 0 0);
-
-  --secondary: oklch(0.955 0 0); /* #f2f2f2 */
-  --secondary-foreground: oklch(0.269 0 0);
-
-  --muted: oklch(0.955 0 0);
-  --muted-foreground: oklch(0.505 0 0); /* #737373 */
-
-  --accent: oklch(0.93 0 0); /* #e8e8e8 — hover wash, deliberately colorless */
-  --accent-foreground: oklch(0.205 0 0);
-
-  --destructive: oklch(0.553 0.198 27.3); /* #b91c1c */
-  --destructive-foreground: oklch(0.985 0 0);
-
-  --border: oklch(0.9 0 0); /* #e0e0e0 */
-  --input: oklch(0.9 0 0);
-  --ring: oklch(0.55 0.1 235);
-
-  /* Flame-bar depth ramp, exposed so the canvas can read it. */
-  --chart-1: oklch(0.72 0.012 250);
-  --chart-2: oklch(0.66 0.012 250);
-  --chart-3: oklch(0.78 0.012 250);
-  --chart-4: oklch(0.6 0.012 250);
-  --chart-5: oklch(0.84 0.012 250);
-}
-
-.dark {
-  color-scheme: dark;
-
-  --background: oklch(0.145 0 0); /* #0a0a0a — matches the canvas today */
-  --foreground: oklch(0.922 0 0); /* #e5e5e5 */
-
-  --card: oklch(0.185 0 0); /* #111111 — the canvas panel value */
-  --card-foreground: oklch(0.922 0 0);
-  --popover: oklch(0.205 0 0); /* #171717 */
-  --popover-foreground: oklch(0.922 0 0);
-
-  --primary: oklch(0.65 0.11 235);
-  --primary-foreground: oklch(0.145 0 0);
-
-  --secondary: oklch(0.24 0 0); /* #1f1f1f */
-  --secondary-foreground: oklch(0.922 0 0);
-
-  --muted: oklch(0.24 0 0);
-  --muted-foreground: oklch(0.6 0 0); /* #8a8a8a */
-
-  --accent: oklch(0.27 0 0); /* #242424 — hover wash */
-  --accent-foreground: oklch(0.985 0 0);
-
-  --destructive: oklch(0.505 0.19 27.3); /* #a81c1c */
-  --destructive-foreground: oklch(0.985 0 0);
-
-  --border: oklch(0.269 0 0); /* #232323 */
-  --input: oklch(0.3 0 0);
-  --ring: oklch(0.65 0.11 235);
-
-  --chart-1: oklch(0.44 0.012 285);
-  --chart-2: oklch(0.51 0.012 285);
-  --chart-3: oklch(0.38 0.012 285);
-  --chart-4: oklch(0.47 0.012 285);
-  --chart-5: oklch(0.34 0.012 285);
+body {
+  background-color: var(--page);
+  background-image: none;
+  font-family: var(--font-mono);
 }
 
 @theme inline {
-  --font-mono:
-    ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
-  --font-sans: var(--font-mono);
-
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
+  --font-mono-face: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono';
 }
 
-/* Tailwind v4 has no `dark:` variant by default when toggling via a class. */
-@custom-variant dark (&:where(.dark, .dark *));
+/*
+ * The flame chart's depth ramp.
+ *
+ * Foundation has no equivalent — it ships surfaces and an ink ramp, not a
+ * categorical sequence — so this is the one token set designed here rather
+ * than installed. The requirements are specific to a flame chart: five steps
+ * that stay distinguishable from each other *and* from both the chart
+ * background and the bar labels drawn on top of them, in both themes.
+ *
+ * Light: a ramp spanning oklch L 0.70–0.86, all at chroma 0.012 hue 258 so it
+ * sits in foundation's cool-neutral family. It runs *darker* than the
+ * `--canvas` it sits on (0.961) rather than lighter, because on a light
+ * background a bar must be the darker element to read as a bar. Dark: 0.31–0.46,
+ * lighter than `--canvas` (0.231) for the same reason inverted.
+ *
+ * The order is deliberately not monotonic by index. The ramp **cycles**, so
+ * step 5 abuts step 1 as well, and a parent and its child must never look like
+ * the same bar — so every one of the five adjacent pairs, wraparound included,
+ * is separated by a large step rather than a smooth gradient.
+ *
+ * Measured (`bun test app/src/chart/palette.test.ts` asserts these hold):
+ *
+ * | pair                | light | dark |
+ * | ------------------- | ----- | ---- |
+ * | bar vs canvas       | 1.37–2.38 | 1.29–2.36 |
+ * | `--ink` label on bar| 6.06–10.51 | 6.43–11.77 |
+ * | adjacent depths     | 1.27–1.52 | 1.31–1.65 |
+ *
+ * Every label clears WCAG AA on every step in both themes, and no two adjacent
+ * depths fall below 1.25:1, the point at which bars start to merge visually.
+ */
+:root {
+  --depth-1: oklch(0.86 0.012 258);
+  --depth-2: oklch(0.75 0.012 258);
+  --depth-3: oklch(0.82 0.012 258);
+  --depth-4: oklch(0.7 0.012 258);
+  --depth-5: oklch(0.78 0.012 258);
+}
 
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
+.dark {
+  --depth-1: oklch(0.38 0.012 258);
+  --depth-2: oklch(0.46 0.012 258);
+  --depth-3: oklch(0.34 0.012 258);
+  --depth-4: oklch(0.43 0.012 258);
+  --depth-5: oklch(0.31 0.012 258);
+}
 
-  body {
-    @apply bg-background text-foreground font-mono;
-  }
+@theme inline {
+  --color-depth-1: var(--depth-1);
+  --color-depth-2: var(--depth-2);
+  --color-depth-3: var(--depth-3);
+  --color-depth-4: var(--depth-4);
+  --color-depth-5: var(--depth-5);
 }

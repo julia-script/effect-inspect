@@ -11,6 +11,7 @@ import type { Session } from '../../../src/protocol/Schema.ts'
 import { Drawer } from './Drawer.tsx'
 import { FlameChart } from './FlameChart.tsx'
 import { SpanDetail } from './SpanDetail.tsx'
+import { ThemeToggle } from './ThemeToggle.tsx'
 import { TraceFileControls } from './TraceFile.tsx'
 import { isLoadedSession } from '../trace/TraceFile.ts'
 import {
@@ -214,6 +215,7 @@ export const Shell = () => {
           <Stats />
           <TraceFileControls />
           <ConnectionBadge />
+          <ThemeToggle />
         </div>
       </header>
 

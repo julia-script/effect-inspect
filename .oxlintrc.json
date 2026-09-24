@@ -19,7 +19,7 @@
       }
     },
     {
-      "files": ["app/src/trace/fixtures/**"],
+      "files": ["app/src/trace/fixtures/**", "app/src/chart/palette.test.ts"],
       "rules": {
         "effecttsgo/node-builtin-import": "off"
       }
