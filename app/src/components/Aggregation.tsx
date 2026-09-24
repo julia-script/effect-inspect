@@ -14,6 +14,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { aggregate, type Aggregation, type SummaryRow, type TreeNode } from '../chart/aggregate.ts'
 import { filterAtom, filterHidesAtom, matches, selectedSpanIdAtom } from '../chart/selection.ts'
 import { traceStore, traceVersionAtom } from '../state/atoms.ts'
+import { headCellClass, rowBackground, TABLE_HEAD } from './EventLog.tsx'
 import { chartViewport } from './FlameChart.tsx'
 import { formatDuration } from './format.ts'
 
@@ -58,21 +59,32 @@ const useAggregation = (): Aggregation => {
   )
 }
 
-const Empty = () => <p className="px-3 py-2 text-[11px] text-neutral-700">No spans in view.</p>
+const Empty = () => <p className="px-3 py-2 text-[11px] text-ink-3">No spans in view.</p>
 
 /** Right-aligned numeric cell, the same width in all three tabs. */
 const Cell = ({ children }: { readonly children: React.ReactNode }) => (
   <span className="w-20 shrink-0 pr-3 text-right tabular-nums">{children}</span>
 )
 
-const HEAD = 'flex shrink-0 border-b border-neutral-900 px-2 py-1 text-[11px] text-neutral-600'
+/** The Event log's header, plus the row padding the trees want. */
+const HEAD = `${TABLE_HEAD} py-1 text-[11px]`
 const SCROLL = 'min-h-0 flex-1 overflow-y-auto text-[11px]'
 
-/** Row background for the selected span, matching the Event log's. */
+/**
+ * Row chrome, shared with the Event log so the four tabs read as one table.
+ *
+ * These rows are not virtualized — the tree is small and already collapsed —
+ * so unlike the Event log the zebra can key off the DOM with `even:`, and
+ * hovering is a CSS state rather than the atom the chart also listens to.
+ */
 const rowClass = (selected: boolean, dimmed: boolean): string =>
-  `flex w-full items-center px-2 text-left tabular-nums hover:bg-neutral-900 ${
-    selected ? 'bg-neutral-800 text-neutral-100' : ''
-  } ${dimmed ? 'text-neutral-700' : 'text-neutral-400'}`
+  `flex w-full items-center px-2 text-left tabular-nums transition-colors odd:bg-[var(--stripe)] hover:bg-[var(--hover)] ${
+    selected ? 'text-ink' : ''
+  } ${dimmed ? 'text-ink-3' : 'text-ink-2'}`
+
+/** Selected rows take the Event log's wash, which must beat the zebra. */
+const rowStyle = (selected: boolean): React.CSSProperties =>
+  selected ? { background: rowBackground(true, false, false) } : {}
 
 type SummarySort = 'self' | 'total' | 'count' | 'average' | 'name'
 
@@ -115,9 +127,9 @@ export const Summary = () => {
                   : { key: column.key, desc: column.key !== 'name' },
               )
             }
-            className={`text-left hover:text-neutral-300 ${
+            className={`${headCellClass(sort.key === column.key)} py-0 ${
               column.key === 'name' ? 'flex-1 pl-3' : 'w-20 pr-3 text-right'
-            } ${sort.key === column.key ? 'text-neutral-300' : ''}`}
+            }`}
           >
             {column.label}
             {sort.key === column.key && (sort.desc ? ' ↓' : ' ↑')}
@@ -134,13 +146,13 @@ export const Summary = () => {
               row.spanId === selectedId,
               !matches(row.name, filter.toLowerCase()),
             )}
-            style={{ height: 22 }}
+            style={{ height: 22, ...rowStyle(row.spanId === selectedId) }}
           >
             <Cell>{row.count}</Cell>
             <Cell>{formatDuration(row.total)}</Cell>
             <Cell>{formatDuration(row.self)}</Cell>
             <Cell>{formatDuration(row.average)}</Cell>
-            <span className={`flex-1 truncate pl-3 ${row.failed ? 'text-red-400' : ''}`}>
+            <span className={`flex-1 truncate pl-3 ${row.failed ? 'text-red' : ''}`}>
               {row.name}
             </span>
           </button>
@@ -189,16 +201,16 @@ const Row = ({
           if (hasChildren) onToggle(node.id)
         }}
         className={rowClass(node.spanId === selectedId, !matches(node.name, filter.toLowerCase()))}
-        style={{ height: 22 }}
+        style={{ height: 22, ...rowStyle(node.spanId === selectedId) }}
       >
         <Cell>{node.count}</Cell>
         <Cell>{formatDuration(node.total)}</Cell>
         <Cell>{formatDuration(node.self)}</Cell>
         <span
-          className={`flex-1 truncate pl-3 ${node.failed ? 'text-red-400' : ''}`}
+          className={`flex-1 truncate pl-3 ${node.failed ? 'text-red' : ''}`}
           style={{ paddingLeft: depth * 12 + 12 }}
         >
-          <span className="inline-block w-3 text-neutral-600">{marker(hasChildren, open)}</span>
+          <span className="inline-block w-3 text-ink-3">{marker(hasChildren, open)}</span>
           {node.name}
         </span>
       </button>
