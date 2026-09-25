@@ -8,6 +8,11 @@
  * Ingest never blocks on a consumer. The ring drops its oldest message when
  * full and the live `PubSub` is sliding, so neither a long-running program nor
  * a stalled webapp client can apply backpressure to the instrumented program.
+ *
+ * A session belongs to the first client instance that announced its ID. Only
+ * that instance's current connection may write to it or end it; a different
+ * instance reusing the ID is refused and counted in `Session.conflicts`, so a
+ * collision can never merge two runs or overwrite the original trace.
  */
 import { Clock, Context, Effect, Layer, PubSub } from 'effect'
 import * as Protocol from '../protocol/Schema.ts'
@@ -26,10 +31,28 @@ export interface SessionSnapshot {
   readonly droppedMessages: number
   /** Lines received for this session that could not be decoded. */
   readonly skippedLines: number
+  /**
+   * Whether the owner sent an instance ID, so a reused ID is refused and
+   * counted. `false` for an older client: a reused ID would have merged.
+   */
+  readonly conflictDetection: boolean
 }
+
+/**
+ * One client connection, as the store knows it: an identity token only.
+ *
+ * Passed with every write so the store can tell the owning connection from a
+ * stale one (a reconnect already replaced it) or a refused one (an ID
+ * collision).
+ */
+export type Connection = symbol
 
 interface SessionState {
   session: Protocol.Session
+  /** The owning client instance; `undefined` for an older client that sends none. */
+  readonly instanceId: string | undefined
+  /** The owner's current connection: the only one allowed to append or end. */
+  connection: Connection
   /**
    * Ring buffer of retained messages: `ring[head]` is the oldest once full.
    *
@@ -53,14 +76,31 @@ interface SessionState {
 export class Store extends Context.Service<
   Store,
   {
-    /** Opens a session, or resumes the existing one when a program reconnects. */
-    readonly hello: (message: Protocol.Hello) => Effect.Effect<void>
-    /** Records one decoded message and fans it out to live subscribers. */
-    readonly append: (message: Protocol.ClientMessage) => Effect.Effect<void>
-    /** Counts one line that could not be decoded. */
-    readonly skipLine: (sessionId: Protocol.SessionId | undefined) => Effect.Effect<void>
-    /** Marks a session ended because its program disconnected. */
-    readonly end: (sessionId: Protocol.SessionId) => Effect.Effect<void>
+    /**
+     * Opens a session for `connection`, or resumes it when the same client
+     * instance reconnects. A different instance announcing a known ID is a
+     * collision: it is refused and counted, and the session is left untouched.
+     */
+    readonly hello: (message: Protocol.Hello, connection: Connection) => Effect.Effect<void>
+    /**
+     * Records one decoded message and fans it out to live subscribers — only
+     * when `connection` owns the message's session.
+     */
+    readonly append: (
+      message: Protocol.ClientMessage,
+      connection: Connection,
+    ) => Effect.Effect<void>
+    /** Counts one line that could not be decoded, if `connection` owns the session. */
+    readonly skipLine: (
+      sessionId: Protocol.SessionId | undefined,
+      connection: Connection,
+    ) => Effect.Effect<void>
+    /**
+     * Marks a session ended because `connection` closed. A no-op unless it is
+     * the owner's current connection, so neither a refused collision nor a
+     * connection a reconnect already replaced can end the owner's run.
+     */
+    readonly end: (sessionId: Protocol.SessionId, connection: Connection) => Effect.Effect<void>
     /** Every known session, in the order they first said `Hello`. */
     readonly sessions: Effect.Effect<ReadonlyArray<Protocol.Session>>
     /** One session's retained messages and loss counters. */
@@ -87,18 +127,32 @@ export const make = Effect.fnUntraced(function* (options?: { readonly capacity?:
   const changes = yield* PubSub.sliding<void>(1)
   const notify = PubSub.publish(changes, undefined).pipe(Effect.asVoid)
 
-  const hello = (message: Protocol.Hello) =>
+  const hello = (message: Protocol.Hello, connection: Connection) =>
     Effect.gen(function* () {
       const existing = sessions.get(message.sessionId)
       if (existing !== undefined) {
-        // A reconnect resumes the session rather than starting a new one, so a
-        // program that is killed and restarted keeps one continuous trace.
+        // Same instance means the client's socket dropped and it dialled back:
+        // resume, so one run keeps one continuous trace. Anything else is an
+        // independent run that chose the same ID. Refusing it keeps the
+        // original trace intact, and counting it lets a query report the
+        // collision rather than serve this run's data as the newcomer's.
+        if (existing.instanceId !== message.instanceId) {
+          existing.session = {
+            ...existing.session,
+            conflicts: (existing.session.conflicts ?? 0) + 1,
+          }
+          yield* notify
+          return
+        }
+        existing.connection = connection
         existing.session = { ...existing.session, active: true }
         delete (existing.session as { endedAtEpochMillis?: number }).endedAtEpochMillis
         yield* notify
         return
       }
       sessions.set(message.sessionId, {
+        instanceId: message.instanceId,
+        connection,
         session: {
           sessionId: message.sessionId,
           program: message.program,
@@ -116,11 +170,18 @@ export const make = Effect.fnUntraced(function* (options?: { readonly capacity?:
       yield* notify
     })
 
-  const append = (message: Protocol.ClientMessage) =>
+  /** The session `connection` currently owns under `sessionId`, if any. */
+  const owned = (sessionId: Protocol.SessionId | undefined, connection: Connection) => {
+    const state = sessionId === undefined ? undefined : sessions.get(sessionId)
+    return state?.connection === connection ? state : undefined
+  }
+
+  const append = (message: Protocol.ClientMessage, connection: Connection) =>
     Effect.suspend(() => {
-      const state = sessions.get(message.sessionId)
-      // A message for a session that never said Hello has nowhere to go. It is
-      // a client bug, not a reason to drop the connection.
+      const state = owned(message.sessionId, connection)
+      // A message for a session this connection does not own — it never said
+      // Hello, or it was refused as a collision — has nowhere to go. It is not
+      // a reason to drop the connection either.
       if (state === undefined) return Effect.void
       if (state.ring.length < capacity) {
         state.ring.push(message)
@@ -134,15 +195,15 @@ export const make = Effect.fnUntraced(function* (options?: { readonly capacity?:
 
   // A line from a connection that never sent a usable `Hello` has no session
   // to count it against, so it is skipped without a counter.
-  const skipLine = (sessionId: Protocol.SessionId | undefined) =>
+  const skipLine = (sessionId: Protocol.SessionId | undefined, connection: Connection) =>
     Effect.sync(() => {
-      const state = sessionId === undefined ? undefined : sessions.get(sessionId)
+      const state = owned(sessionId, connection)
       if (state !== undefined) state.skippedLines += 1
     })
 
-  const end = (sessionId: Protocol.SessionId) =>
+  const end = (sessionId: Protocol.SessionId, connection: Connection) =>
     Effect.flatMap(Clock.currentTimeMillis, (now) => {
-      const state = sessions.get(sessionId)
+      const state = owned(sessionId, connection)
       if (state === undefined || !state.session.active) return Effect.void
       state.session = {
         ...state.session,
@@ -164,6 +225,7 @@ export const make = Effect.fnUntraced(function* (options?: { readonly capacity?:
             : state.ring.slice(state.head).concat(state.ring.slice(0, state.head)),
         droppedMessages: state.droppedMessages,
         skippedLines: state.skippedLines,
+        conflictDetection: state.instanceId !== undefined,
       }
     })
 

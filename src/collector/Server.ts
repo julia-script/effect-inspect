@@ -12,6 +12,7 @@ import { HttpServer, HttpServerRequest, HttpServerResponse } from 'effect/unstab
 import { Socket } from 'effect/unstable/socket'
 import { clientCodec, collectorCodec, webappCodec, webappRequestCodec } from '../protocol/Codec.ts'
 import type * as Protocol from '../protocol/Schema.ts'
+import * as QueryApi from './QueryApi.ts'
 import { Store } from './Store.ts'
 
 /** Path a webapp client connects on; anything else is an instrumented program. */
@@ -95,6 +96,8 @@ const handleClient = Effect.fnUntraced(function* (socket: Socket.Socket) {
   const store = yield* Store
   const pull = yield* readerFor(socket)
   const writer = yield* socket.writer
+  /** This connection's identity, so the store can tell it from a collision. */
+  const connection = Symbol('connection')
   /** The session this connection belongs to, learned from its `Hello`. */
   let sessionId: Protocol.SessionId | undefined
 
@@ -103,7 +106,7 @@ const handleClient = Effect.fnUntraced(function* (socket: Socket.Socket) {
       sessionId = message.sessionId
       switch (message._tag) {
         case 'Hello':
-          yield* store.hello(message)
+          yield* store.hello(message, connection)
           return
         case 'Ping':
           // A failed write means the client is gone; the read loop notices.
@@ -112,17 +115,20 @@ const handleClient = Effect.fnUntraced(function* (socket: Socket.Socket) {
           )
           return
         default:
-          yield* store.append(message)
+          yield* store.append(message, connection)
       }
     })
 
   yield* readLines(pull, clientCodec.decode, onMessage, () =>
-    Effect.suspend(() => store.skipLine(sessionId)),
+    Effect.suspend(() => store.skipLine(sessionId, connection)),
   ).pipe(
     // However the connection ends — clean close, crash, kill -9 — the session
-    // is marked ended. A reconnect with the same id resumes it.
+    // is marked ended, if this connection still owns it. A reconnect from the
+    // same client instance resumes it.
     Effect.ensuring(
-      Effect.suspend(() => (sessionId === undefined ? Effect.void : store.end(sessionId))),
+      Effect.suspend(() =>
+        sessionId === undefined ? Effect.void : store.end(sessionId, connection),
+      ),
     ),
   )
 })
@@ -213,14 +219,16 @@ export const handleConnection = (
 ): Effect.Effect<void, never, Store> =>
   Effect.scoped(path === webappPath ? handleWebapp(socket) : handleClient(socket))
 
-/** Serves instrumented clients, webapp sockets, and the bundled web UI. */
+/** Serves instrumented clients, webapp sockets, the query API and the bundled web UI. */
 export const run = (fetch?: (request: Request) => Promise<Response>) =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer
     yield* server.serve(
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
-        const path = new URL(request.url, 'http://localhost').pathname
+        const url = new URL(request.url, 'http://localhost')
+        const path = url.pathname
+        if (path.startsWith(QueryApi.apiPath)) return yield* QueryApi.handle(request, url)
         if (request.headers.upgrade?.toLowerCase() === 'websocket') {
           const socket = yield* request.upgrade
           yield* handleConnection(socket, path)
@@ -233,7 +241,7 @@ export const run = (fetch?: (request: Request) => Promise<Response>) =>
         }
         const response = yield* Effect.promise(() =>
           fetch(
-            new Request(new URL(request.url, 'http://localhost').href, {
+            new Request(url.href, {
               method: request.method,
               headers: request.headers,
             }),

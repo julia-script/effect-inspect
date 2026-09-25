@@ -21,7 +21,11 @@ import { make as makeStore, Store } from './Store.ts'
 
 const clock = { startTime: 1_000n, wallClockEpochMillis: 1_700_000_000_000 }
 
-const hello = (sessionId: string, program: string): Protocol.ClientMessage => ({
+const hello = (
+  sessionId: string,
+  program: string,
+  instanceId?: string,
+): Protocol.ClientMessage => ({
   _tag: 'Hello',
   sessionId,
   program,
@@ -29,6 +33,7 @@ const hello = (sessionId: string, program: string): Protocol.ClientMessage => ({
   runtime: 'bun',
   protocolVersion,
   clock,
+  ...(instanceId === undefined ? {} : { instanceId }),
 })
 
 const spanStart = (sessionId: string, spanId: string): Protocol.ClientMessage => ({
@@ -308,4 +313,158 @@ describe('collector', () => {
         expect(spanIds(snapshot?.messages)).toEqual(['first-run', 'second-run'])
       }),
     ))
+})
+
+describe('collector session identity', () => {
+  const recorded = (collector: Collector, sessionId: string, count: number) =>
+    until(
+      Effect.map(
+        collector.store.snapshot(sessionId),
+        (snapshot) => snapshot?.messages.length === count,
+      ),
+      `${count} messages recorded for ${sessionId}`,
+    )
+  const conflicts = (collector: Collector, sessionId: string, count: number) =>
+    until(
+      Effect.map(
+        collector.store.snapshot(sessionId),
+        (snapshot) => snapshot?.session.conflicts === count,
+      ),
+      `${count} conflicts on ${sessionId}`,
+    )
+
+  it('refuses a second instance reusing an active ID without touching the owner', () =>
+    runTest(
+      Effect.gen(function* () {
+        const collector = yield* startCollector()
+        const owner = yield* connect(collector.port)
+        yield* owner.send(clientCodec.encode(hello('shared-1', 'owner', 'instance-a')))
+        yield* owner.send(clientCodec.encode(spanStart('shared-1', 'owner-1')))
+        yield* recorded(collector, 'shared-1', 1)
+
+        const intruder = yield* connect(collector.port)
+        yield* intruder.send(clientCodec.encode(hello('shared-1', 'intruder', 'instance-b')))
+        yield* conflicts(collector, 'shared-1', 1)
+        yield* intruder.send(clientCodec.encode(spanStart('shared-1', 'intruder-1')) + 'not json\n')
+        // Closing the refused connection must not end the owner's session.
+        yield* intruder.close
+        yield* Effect.sleep('50 millis')
+
+        yield* owner.send(clientCodec.encode(spanStart('shared-1', 'owner-2')))
+        yield* recorded(collector, 'shared-1', 2)
+        const snapshot = yield* collector.store.snapshot('shared-1')
+        expect(spanIds(snapshot?.messages)).toEqual(['owner-1', 'owner-2'])
+        expect(snapshot?.skippedLines).toBe(0)
+        expect(snapshot?.session).toMatchObject({ program: 'owner', active: true, conflicts: 1 })
+        expect(yield* collector.store.sessions).toHaveLength(1)
+      }),
+    ))
+
+  it('refuses reuse of an ended ID while its history is retained', () =>
+    runTest(
+      Effect.gen(function* () {
+        const collector = yield* startCollector()
+        const first = yield* connect(collector.port)
+        yield* first.send(clientCodec.encode(hello('reused-1', 'first', 'instance-a')))
+        yield* first.send(clientCodec.encode(spanStart('reused-1', 'first-run')))
+        yield* recorded(collector, 'reused-1', 1)
+        yield* first.close
+        yield* until(
+          Effect.map(collector.store.sessions, (sessions) => sessions[0]?.active === false),
+          'first run ended',
+        )
+
+        const later = yield* connect(collector.port)
+        yield* later.send(clientCodec.encode(hello('reused-1', 'later', 'instance-b')))
+        yield* later.send(clientCodec.encode(spanStart('reused-1', 'later-run')))
+        yield* conflicts(collector, 'reused-1', 1)
+        yield* Effect.sleep('50 millis')
+
+        // The original run is preserved as it was: ended, unmerged, flagged.
+        const snapshot = yield* collector.store.snapshot('reused-1')
+        expect(spanIds(snapshot?.messages)).toEqual(['first-run'])
+        expect(snapshot?.session).toMatchObject({ program: 'first', active: false, conflicts: 1 })
+      }),
+    ))
+
+  it('lets the same instance reconnect before its old connection is noticed closed', () =>
+    runTest(
+      Effect.gen(function* () {
+        const collector = yield* startCollector()
+        const stale = yield* connect(collector.port)
+        yield* stale.send(clientCodec.encode(hello('flaky-1', 'flaky', 'instance-a')))
+        yield* stale.send(clientCodec.encode(spanStart('flaky-1', 'before')))
+        yield* recorded(collector, 'flaky-1', 1)
+
+        const fresh = yield* connect(collector.port)
+        yield* fresh.send(clientCodec.encode(hello('flaky-1', 'flaky', 'instance-a')))
+        yield* fresh.send(clientCodec.encode(spanStart('flaky-1', 'after')))
+        yield* recorded(collector, 'flaky-1', 2)
+
+        // The replaced connection closing late must not end the resumed run.
+        yield* stale.close
+        yield* Effect.sleep('50 millis')
+        const snapshot = yield* collector.store.snapshot('flaky-1')
+        expect(spanIds(snapshot?.messages)).toEqual(['before', 'after'])
+        expect(snapshot?.session.active).toBe(true)
+        expect(snapshot?.session.conflicts).toBeUndefined()
+      }),
+    ))
+
+  it(
+    'keeps two concurrently launched programs apart by their chosen IDs',
+    () =>
+      runTest(
+        Effect.gen(function* () {
+          const collector = yield* startCollector()
+          // Real child processes, so the ID genuinely arrives through the
+          // environment variable an agent would set at launch.
+          const inspect = new URL('../client/Inspect.ts', import.meta.url).pathname
+          const script = (label: string) => `
+          import { Effect } from 'effect'
+          import * as Inspect from ${JSON.stringify(inspect)}
+          const step = (i) => Effect.sleep('10 millis').pipe(Effect.withSpan('${label}-' + i))
+          await Effect.runPromise(
+            Effect.forEach([0, 1, 2, 3, 4], step, { discard: true }).pipe(
+              Effect.provide(Inspect.layer({ url: 'ws://127.0.0.1:${collector.port}', memoryIntervalMillis: 0 })),
+            ),
+          )`
+          const launch = (label: string, sessionId: string) =>
+            Effect.promise(
+              () =>
+                Bun.spawn([process.execPath, '-e', script(label)], {
+                  cwd: new URL('../..', import.meta.url).pathname,
+                  env: { ...process.env, EFFECT_INSPECT_SESSION_ID: sessionId },
+                  stdout: 'ignore',
+                  stderr: 'inherit',
+                }).exited,
+            )
+          const codes = yield* Effect.all(
+            [launch('alpha', 'agent-a-run-001'), launch('beta', 'agent-b-run-001')],
+            { concurrency: 'unbounded' },
+          )
+          expect(codes).toEqual([0, 0])
+
+          for (const [sessionId, label] of [
+            ['agent-a-run-001', 'alpha'],
+            ['agent-b-run-001', 'beta'],
+          ] as const) {
+            yield* until(
+              Effect.map(
+                collector.store.snapshot(sessionId),
+                (snapshot) => snapshot?.session.active === false,
+              ),
+              `${sessionId} ended`,
+            )
+            const snapshot = yield* collector.store.snapshot(sessionId)
+            const names = snapshot?.messages.flatMap((message) =>
+              message._tag === 'SpanStart' ? [message.name] : [],
+            )
+            expect(names).toEqual([0, 1, 2, 3, 4].map((i) => `${label}-${i}`))
+            expect(snapshot?.session.conflicts).toBeUndefined()
+          }
+        }),
+      ),
+    15_000,
+  )
 })

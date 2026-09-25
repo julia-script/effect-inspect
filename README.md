@@ -66,9 +66,76 @@ Options, all optional:
 Inspect.layer({
   url: 'ws://localhost:34437', // where the collector listens
   programName: 'my-service', // what the session list shows; defaults to the entry script's file name
+  sessionId: 'checkout-before-1', // see "Choosing the session ID"; defaults to a random UUID
   bufferSize: 131072, // outbound queue, in messages (~34 MB at the measured mean)
 })
 ```
+
+### Choosing the session ID
+
+A launcher — you, a script, or a coding agent — can pick the session ID before
+starting an already instrumented program, so it can find that exact run later
+without searching the session list:
+
+```bash
+EFFECT_INSPECT_SESSION_ID=checkout-before-1 bun my-program.ts
+```
+
+The `sessionId` option wins over the variable; with neither, a random UUID is
+used only when the variable is absent. IDs are 1–128 ASCII letters, digits,
+`.`, `_` or `-`, starting with a letter or digit. An invalid ID — including a
+variable that is set but empty — is not replaced with another one: the program
+runs normally, records nothing, and logs a warning saying why. The same
+happens when the runtime has an environment it may not read: under Deno
+without env permission the layer checks the permission first (it never asks
+for it, so the program is not stopped at a prompt) and disables recording.
+Pass the `sessionId` option, or grant access with
+`--allow-env=EFFECT_INSPECT_SESSION_ID`, to record there. A runtime with no
+environment at all, such as a browser, just uses a random UUID. Setting the variable does not instrument a program by
+itself; it still needs `Inspect.layer()`.
+
+**Use one ID per run.** The ID is kept across reconnects, but a _different_
+run announcing an ID the collector already holds — even one whose run has
+ended — is refused as a collision: its telemetry is discarded, the original
+trace is left untouched, and the session records the refused connection in its
+`conflicts` count. Give reproduction attempts their own IDs, and remember that
+child processes inherit the variable: give each instrumented child a distinct
+value, or remove it from the child's environment (`env -u
+EFFECT_INSPECT_SESSION_ID …`, or delete the key from the `env` passed to
+`spawn`) — setting it to an empty string disables recording instead. IDs
+correlate runs; they are not authentication.
+
+Collision refusal needs a collector from this release or later. It tells runs
+apart by a per-client instance ID that older clients do not send, so an older
+client is treated as one run per ID and reconnects as before. An older
+collector ignores the instance ID and merges runs that reuse an ID into one
+session.
+
+## Querying runs from the command line
+
+Coding agents (and people) can query a run as JSON instead of opening the web
+UI. Pick the session ID before launch, then ask for exactly that run:
+
+```bash
+npx effect-inspect start                                   # terminal 1, leave running
+EFFECT_INSPECT_SESSION_ID=checkout-fail-001 bun my-program.ts
+npx effect-inspect summary --session checkout-fail-001 --json
+npx effect-inspect spans   --session checkout-fail-001 --status failed --json
+npx effect-inspect span    --session checkout-fail-001 --span SPAN_ID --json
+npx effect-inspect logs    --session checkout-fail-001 --span SPAN_ID --json
+npx effect-inspect export  --session checkout-fail-001 --out checkout-fail-001.eitrace --json
+npx effect-inspect summary --file checkout-fail-001.eitrace --json   # no collector needed
+```
+
+Live queries need `--session`; the newest session is never assumed, and an
+unknown or reused ID fails with its own error instead of answering for another
+run. Every command prints one JSON document on stdout (at most 1 MiB), a
+diagnostic on stderr on failure, and a distinct exit code per outcome. The
+collector address is `--url`, else `http://localhost:$EFFECT_INSPECT_PORT`,
+else port 34437. `npx effect-inspect --help` and `npx effect-inspect <command>
+--help` are the full reference: flags, defaults, JSON fields, errors and what
+to try next. Durations are observed elapsed time, not CPU time or a slowness
+verdict.
 
 ## Saving and loading traces
 

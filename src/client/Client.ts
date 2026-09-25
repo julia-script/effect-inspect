@@ -109,8 +109,22 @@ export class InspectClient extends Context.Service<
   }
 >()('effect-inspect/client/InspectClient') {}
 
+/** Environment variable a launcher sets to choose the session ID. */
+export const sessionIdEnv = 'EFFECT_INSPECT_SESSION_ID'
+
 /** Options accepted by the inspect layers. */
 export interface Options {
+  /**
+   * The session ID this run reports under, e.g. `checkout-before-1`, so it can
+   * be queried by that exact name. Takes precedence over the
+   * `EFFECT_INSPECT_SESSION_ID` environment variable; a random UUID is used
+   * when neither is set. Must satisfy {@link Protocol.isValidSessionId}.
+   *
+   * Use one ID per run: a second client instance announcing an ID the
+   * collector already holds is refused as a collision, and its telemetry is
+   * discarded — by a collector from this release on; older ones merge them.
+   */
+  readonly sessionId?: string | undefined
   /** Name shown for this program in the webapp. Defaults to the entry script's file name. */
   readonly programName?: string | undefined
   /** Outbound queue capacity, in messages. Defaults to 131072 (~34 MB). */
@@ -158,6 +172,90 @@ const runtimeName = (): string => {
 const memoryUsage = (): (() => NodeJS.MemoryUsage) | undefined => {
   const usage = globalThis.process?.memoryUsage
   return typeof usage === 'function' ? usage.bind(globalThis.process) : undefined
+}
+
+/** The slice of Deno's permission API needed to look before reading. */
+interface DenoPermissions {
+  readonly permissions?: {
+    readonly querySync?: (descriptor: { readonly name: 'env'; readonly variable: string }) => {
+      readonly state: string
+    }
+  }
+}
+
+/**
+ * The raw process environment, or `undefined` when the runtime has none.
+ *
+ * Throws when an environment exists but may not be read. Deno is asked first,
+ * with `permissions.querySync`, which reports `granted` / `prompt` / `denied`
+ * without ever prompting: reading `process.env` there without permission
+ * either throws `NotCapable` or, in a terminal, stops the host program at an
+ * interactive prompt — and inspection must never block the program it
+ * watches.
+ */
+const processEnv = (): Readonly<Record<string, string | undefined>> | undefined => {
+  const process = globalThis.process
+  if (process === undefined) return undefined
+  const deno = (globalThis as { readonly Deno?: DenoPermissions }).Deno
+  if (deno !== undefined) {
+    const state = deno.permissions?.querySync?.({ name: 'env', variable: sessionIdEnv }).state
+    if (state !== 'granted') {
+      throw new Error(`env access is ${state ?? 'unknown'} (Deno: --allow-env=${sessionIdEnv})`)
+    }
+  }
+  return process.env
+}
+
+/**
+ * Picks this client's session ID: the `sessionId` option, else the exact
+ * `EFFECT_INSPECT_SESSION_ID` key of the environment, else a random UUID.
+ *
+ * | Input                                   | Result                   |
+ * | --------------------------------------- | ------------------------ |
+ * | option given (env never touched)        | the option, if valid     |
+ * | no environment, or exact key absent     | random UUID              |
+ * | exact key set, valid                    | that value               |
+ * | exact key set but empty, or invalid     | failure (diagnostic)     |
+ * | environment exists but cannot be read   | failure (diagnostic)     |
+ *
+ * `env` yields the raw record, read directly rather than through Effect's
+ * `ConfigProvider`: the env provider reports an empty value as missing, and
+ * this setting has to tell a set-but-empty variable (`ID=$UNSET_VAR`, a
+ * launcher mistake) from an absent one. So only the exact key counts —
+ * similarly prefixed variables are irrelevant. An unreadable environment is
+ * not treated as absence: the launcher may well have chosen an ID there.
+ *
+ * Never throws: a failure is a diagnostic, and the caller records nothing
+ * rather than report under a substituted ID nobody can find. Exported for
+ * tests only; not part of the public API.
+ */
+export const resolveSessionId = (
+  options: Options | undefined,
+  env: () => Readonly<Record<string, string | undefined>> | undefined = processEnv,
+): Result.Result<Protocol.SessionId, string> => {
+  const fromOption = options?.sessionId
+  const source = fromOption === undefined ? sessionIdEnv : 'the sessionId option'
+  let chosen = fromOption
+  if (chosen === undefined) {
+    try {
+      chosen = env()?.[sessionIdEnv]
+    } catch (error) {
+      return Result.fail(`${sessionIdEnv} could not be read: ${String(error)}`)
+    }
+  }
+  if (chosen === undefined) {
+    // Effect's `Crypto` can fail with a PlatformError and nothing on this path
+    // is allowed to fail; a session id needs uniqueness, not strength.
+    // oxlint-disable-next-line effecttsgo/crypto-random-uuid
+    return Result.succeed(crypto.randomUUID())
+  }
+  if (chosen === '') return Result.fail(`${source} is set but empty: unset it or choose an ID`)
+  if (!Protocol.isValidSessionId(chosen)) {
+    return Result.fail(
+      `${source} is not a valid session ID "${chosen}": use ${Protocol.sessionIdRule}`,
+    )
+  }
+  return Result.succeed(chosen)
 }
 
 /**
@@ -210,18 +308,28 @@ const forkMemorySampler = (deps: {
  * The returned effect never fails and never waits for the collector: if it is
  * unreachable the fiber retries in the background while `sendUnsafe` keeps
  * accepting (and dropping) messages, so the host program is unaffected.
+ *
+ * The session ID is resolved once, here, and re-announced unchanged on every
+ * reconnect. If the chosen ID is invalid the client logs a warning and records
+ * nothing, rather than reporting under an ID nobody asked for.
  */
 export const make = (
   options?: Options,
 ): Effect.Effect<InspectClient['Service'], never, Scope.Scope | Socket.Socket> =>
   Effect.gen(function* () {
+    const resolved = resolveSessionId(options)
+    if (Result.isFailure(resolved)) {
+      yield* Effect.logWarning(`effect-inspect disabled: ${resolved.failure}`)
+      return InspectClient.of({ sessionId: '', sendUnsafe: () => {} })
+    }
+    const sessionId = resolved.success
+    // Distinguishes this client from an independent run that chose the same
+    // session ID; fixed for the client's lifetime so a reconnect still matches.
+    // oxlint-disable-next-line effecttsgo/crypto-random-uuid-in-effect
+    const instanceId = crypto.randomUUID()
     const socket = yield* SocketService.Socket
     const capacity = options?.bufferSize ?? defaultBufferSize
     const queue = yield* Queue.dropping<Protocol.ClientMessage>(capacity)
-    // Effect's `Crypto` can fail with a PlatformError and nothing on this path
-    // is allowed to fail; a session id needs uniqueness, not strength.
-    // oxlint-disable-next-line effecttsgo/crypto-random-uuid-in-effect
-    const sessionId = crypto.randomUUID()
 
     // Tracked here rather than inside the queue so a drop survives a
     // reconnect: it is reported on the next `Hello`, which every reconnect
@@ -255,6 +363,7 @@ export const make = (
         pid: globalThis.process?.pid ?? 0,
         runtime: runtimeName(),
         protocolVersion: Protocol.protocolVersion,
+        instanceId,
         clock: {
           startTime: clock.currentTimeNanosUnsafe(),
           // Deliberately the wall clock: this is the anchor that maps the

@@ -31,6 +31,9 @@ between them.
   flat-out delivers about 85% of them. The example sleeps ~12ms between batches
   and settles for a second at the end. If you want to _see_ the loss behaviour
   instead, drop those sleeps — the gap surfaces in the trace as a `Warn` log.
+- The examples dial `ws://localhost:$EFFECT_INSPECT_PORT` (default 34437), so
+  they follow a collector started on another port. `Inspect.layer()` itself does
+  not read that variable; it uses its `url` option.
 - `examples/run.ts` is the shared entry point: it probes the collector, prints
   the hint, and provides the layer. It is not itself an example.
 

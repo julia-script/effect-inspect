@@ -53,9 +53,29 @@ export const Json: Schema.Codec<Json> = Schema.Union([
 export const Attributes = Schema.Record(Schema.String, Json)
 export type Attributes = Schema.Schema.Type<typeof Attributes>
 
-/** Identifies one run of an instrumented program. */
+/**
+ * Identifies one run of an instrumented program.
+ *
+ * Any string on the wire, so traces from older clients keep decoding. IDs a
+ * caller chooses are held to {@link isValidSessionId} by the client instead.
+ */
 export const SessionId = Schema.String
 export type SessionId = Schema.Schema.Type<typeof SessionId>
+
+/** What {@link isValidSessionId} accepts, phrased for diagnostics. */
+export const sessionIdRule =
+  '1-128 ASCII letters, digits, ".", "_" or "-", starting with a letter or digit'
+
+/**
+ * Whether a caller-chosen session ID is acceptable, such as `checkout-before-1`.
+ *
+ * Human-readable rather than UUID-shaped, and needs no quoting as a shell
+ * argument. No colon, so a chosen ID can never take the `loaded:` form the
+ * webapp gives sessions read from a saved file. A generated UUID also
+ * satisfies it.
+ */
+export const isValidSessionId = (id: string): boolean =>
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)
 
 const sessionId = { sessionId: SessionId }
 
@@ -98,6 +118,13 @@ export const Hello = Schema.Struct({
   runtime: Schema.String,
   protocolVersion: Schema.Natural,
   clock: Clock,
+  /**
+   * Random per client instance, fixed for its lifetime and re-sent on every
+   * reconnect. Tells a genuine reconnect (same instance) from an independent
+   * run that chose the same `sessionId`. Absent from older clients, which are
+   * treated as one instance per `sessionId`.
+   */
+  instanceId: Schema.optional(Schema.String),
 })
 export type Hello = Schema.Schema.Type<typeof Hello>
 
@@ -350,6 +377,12 @@ export const Session = Schema.Struct({
   clock: Clock,
   active: Schema.Boolean,
   endedAtEpochMillis: Schema.optional(Schema.Natural),
+  /**
+   * Connections refused because a different client instance announced this
+   * `sessionId` — an ID collision. Their telemetry was discarded, so this
+   * session holds only the first instance's run. Absent when there were none.
+   */
+  conflicts: Schema.optional(Schema.Natural),
 })
 export type Session = Schema.Schema.Type<typeof Session>
 
@@ -422,6 +455,24 @@ export const WebappRequest = Schema.Union([Subscribe, Unsubscribe])
 export type WebappRequest = Schema.Schema.Type<typeof WebappRequest>
 
 /**
+ * Collector-side loss counters for one session at snapshot time, carried in
+ * a trace file exported from the collector.
+ */
+export const TraceCapture = Schema.Struct({
+  /** Messages evicted by the collector's per-session capacity bound. */
+  droppedMessages: Schema.Natural,
+  /** Lines received for the session that could not be decoded. */
+  skippedLines: Schema.Natural,
+  /**
+   * Whether the collector could refuse an independent run reusing this ID.
+   * `false` when the owning client predates instance IDs, so a reused ID
+   * would have merged silently and `session.conflicts` proves nothing.
+   */
+  conflictDetection: Schema.Boolean,
+})
+export type TraceCapture = Schema.Schema.Type<typeof TraceCapture>
+
+/**
  * Line 1 of a saved trace file.
  *
  * The rest of the file is {@link ClientMessage} NDJSON, byte-identical to what
@@ -441,6 +492,13 @@ export const TraceFileHeader = Schema.Struct({
   protocolVersion: Schema.Natural,
   session: Session,
   savedAtEpochMillis: Schema.Natural,
+  /**
+   * What the collector knew about loss when the file was exported from it.
+   * Absent from browser saves and older files: their capture completeness is
+   * unknown, not complete. Optional and additive, so older builds, which
+   * ignore unknown header keys, still read these files.
+   */
+  capture: Schema.optional(TraceCapture),
 })
 export type TraceFileHeader = Schema.Schema.Type<typeof TraceFileHeader>
 

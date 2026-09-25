@@ -8,9 +8,10 @@
 // oxlint-disable effecttsgo/lazy-promise-in-effect-sync
 // oxlint-disable typescript/no-floating-promises
 import { describe, expect, it } from 'bun:test'
-import { Effect, Exit, Result } from 'effect'
+import { Effect, Exit, Layer, Logger, Result } from 'effect'
 import { clientCodec } from '../protocol/Codec.ts'
-import type { ClientMessage } from '../protocol/Schema.ts'
+import { isValidSessionId, type ClientMessage, type Hello } from '../protocol/Schema.ts'
+import * as Client from './Client.ts'
 import * as Inspect from './Inspect.ts'
 
 /**
@@ -19,12 +20,31 @@ import * as Inspect from './Inspect.ts'
  *
  * The server is real rather than a stubbed `Socket`, because most of what this
  * layer promises is about a socket's failure modes.
+ *
+ * `env` is written into the real `process.env` for the run — so the layer's
+ * default environment path is what gets tested — with
+ * `EFFECT_INSPECT_SESSION_ID` cleared first so the shell running the tests
+ * cannot leak in; every touched key is restored afterwards. Logs are captured
+ * in place of the console.
  */
+/** Captured at load, so a test that hides the `process` global can still restore it. */
+const realEnv = process.env
+
 const withCollector = async <A>(
   program: Effect.Effect<A, never, never>,
-  options?: Inspect.Options,
-): Promise<{ readonly value: A; readonly messages: ReadonlyArray<ClientMessage> }> => {
+  options?: Inspect.Options & { readonly env?: Record<string, string> },
+): Promise<{
+  readonly value: A
+  readonly messages: ReadonlyArray<ClientMessage>
+  readonly logs: ReadonlyArray<string>
+}> => {
+  const { env, ...layerOptions } = options ?? {}
+  const logs: Array<string> = []
   const lines: Array<string> = []
+  const touched = [Client.sessionIdEnv, ...Object.keys(env ?? {})]
+  const saved = touched.map((key) => [key, realEnv[key]] as const)
+  for (const key of touched) delete realEnv[key]
+  Object.assign(realEnv, env)
   let received: (() => void) | undefined
   const server = Bun.serve({
     port: 0,
@@ -40,7 +60,18 @@ const withCollector = async <A>(
   try {
     const value = await Effect.runPromise(
       program.pipe(
-        Effect.provide(Inspect.layer({ ...options, url: `ws://localhost:${server.port}` })),
+        // The capturing logger is provided *to* the inspect layer, so a warning
+        // logged while it is built is captured too.
+        Effect.provide(
+          Layer.provide(
+            Inspect.layer({ ...layerOptions, url: `ws://localhost:${server.port}` }),
+            Logger.layer([
+              Logger.make(({ message }) => {
+                logs.push(String(message))
+              }),
+            ]),
+          ),
+        ),
       ),
     )
     // The layer's scope closes with the program, but delivery is asynchronous:
@@ -52,9 +83,13 @@ const withCollector = async <A>(
     const messages = lines.flatMap((line) =>
       Result.getOrElse(clientCodec.decodeAll(line), () => [] as ReadonlyArray<ClientMessage>),
     )
-    return { value, messages }
+    return { value, messages, logs }
   } finally {
     server.stop(true)
+    for (const [key, value] of saved) {
+      if (value === undefined) delete realEnv[key]
+      else realEnv[key] = value
+    }
   }
 }
 
@@ -160,6 +195,11 @@ describe('Inspect.layer', () => {
     // The reconnect re-announces the session rather than starting a new one.
     expect(second[0]?._tag).toBe('Hello')
     expect(second[0]?.sessionId).toBe(first[0]!.sessionId)
+    // As the same client instance, so the collector resumes rather than refuses.
+    const instanceOf = (message: ClientMessage | undefined) =>
+      message?._tag === 'Hello' ? message.instanceId : undefined
+    expect(instanceOf(first[0])).toBeString()
+    expect(instanceOf(second[0])).toBe(instanceOf(first[0]))
     // And telemetry emitted after the restart reaches the new collector.
     expect(second.some((message) => message._tag === 'SpanStart')).toBe(true)
   }, 10_000)
@@ -315,5 +355,230 @@ describe('Inspect.layer', () => {
         message._tag === 'Log' && message.annotations['effect_inspect.dropped'] !== undefined,
     )
     expect(dropped).toBeDefined()
+  })
+})
+
+describe('Inspect.layer session ID', () => {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  const hellos = (messages: ReadonlyArray<ClientMessage>): ReadonlyArray<Hello> =>
+    messages.filter((message) => message._tag === 'Hello')
+  const env = { EFFECT_INSPECT_SESSION_ID: 'from-env-1' }
+  const traced = Effect.void.pipe(Effect.withSpan('work'))
+
+  it('prefers the sessionId option over the environment', async () => {
+    const { messages } = await withCollector(traced, { sessionId: 'checkout-before-1', env })
+    expect(messages.every((message) => message.sessionId === 'checkout-before-1')).toBe(true)
+    expect(messages.some((message) => message._tag === 'SpanStart')).toBe(true)
+  })
+
+  it('reads EFFECT_INSPECT_SESSION_ID when no option is given', async () => {
+    const { messages } = await withCollector(traced, { env })
+    expect(hellos(messages).map((hello) => hello.sessionId)).toStrictEqual(['from-env-1'])
+  })
+
+  // The verifier's matrix: an exact key that is present but empty disables
+  // recording whatever its `_`-prefixed neighbours are; only its absence
+  // yields a UUID. `G` is `A` again, named separately in the report as the
+  // real `process.env` case — every case here goes through `process.env`.
+  const ID = 'EFFECT_INSPECT_SESSION_ID'
+  const matrix: ReadonlyArray<readonly [string, Record<string, string>, string]> = [
+    ['A', { [ID]: '', [`${ID}_X`]: 'foo' }, 'disabled'],
+    ['B', { [`${ID}_X`]: 'foo' }, 'uuid'],
+    ['C', { [ID]: 'abc', [`${ID}_X`]: 'foo' }, 'abc'],
+    ['D', { [ID]: '' }, 'disabled'],
+    ['E', { [ID]: '', [`${ID}_X`]: '' }, 'disabled'],
+    ['F', { [`${ID}_X`]: '' }, 'uuid'],
+    ['G', { [ID]: '', [`${ID}_X`]: 'foo', EFFECT_INSPECT_PORT: '1' }, 'disabled'],
+  ]
+
+  for (const [label, caseEnv, expected] of matrix) {
+    it(`case ${label}: ${JSON.stringify(caseEnv)} -> ${expected}`, async () => {
+      const { value, messages, logs } = await withCollector(
+        Effect.succeed('ok').pipe(Effect.withSpan('work')),
+        { env: caseEnv },
+      )
+      expect(value).toBe('ok')
+      const sent = hellos(messages).map((hello) => hello.sessionId)
+      if (expected === 'disabled') {
+        expect(messages).toStrictEqual([])
+        expect(logs.some((log) => log.includes(`${ID} is set but empty`))).toBe(true)
+      } else {
+        expect(sent).toHaveLength(1)
+        expect(sent[0]).toMatch(expected === 'uuid' ? uuid : new RegExp(`^${expected}$`))
+        expect(logs.some((log) => log.includes('effect-inspect disabled'))).toBe(false)
+      }
+    })
+  }
+
+  it('resolves injected env records exactly as it resolves process.env', () => {
+    for (const [, caseEnv, expected] of matrix) {
+      const resolved = Client.resolveSessionId(undefined, () => caseEnv)
+      if (expected === 'disabled') expect(Result.isFailure(resolved)).toBe(true)
+      else expect(Result.getOrThrow(resolved)).toMatch(expected === 'uuid' ? uuid : expected)
+    }
+    // No environment at all, as in a runtime without `process`, is absence.
+    expect(Result.getOrThrow(Client.resolveSessionId(undefined, () => undefined))).toMatch(uuid)
+  })
+
+  it('reports an unreadable environment instead of throwing or treating it as absent', () => {
+    const denied = new Error('NotCapable: Requires env access')
+    const unreadable = [
+      () => {
+        throw denied
+      },
+      () =>
+        new Proxy<Record<string, string>>(
+          {},
+          {
+            get: () => {
+              throw denied
+            },
+          },
+        ),
+    ]
+    for (const env of unreadable) {
+      const resolved = Client.resolveSessionId(undefined, env)
+      expect(Result.isFailure(resolved)).toBe(true)
+      expect(Result.isFailure(resolved) ? resolved.failure : '').toContain('could not be read')
+      // An explicit option never touches the environment at all.
+      expect(Result.getOrThrow(Client.resolveSessionId({ sessionId: 'opt-1' }, env))).toBe('opt-1')
+    }
+  })
+
+  /** Runs `f` with the `process` / `Deno` globals replaced, restoring them after. */
+  const withGlobals = async <A>(
+    globals: { readonly process?: unknown; readonly Deno?: unknown },
+    f: () => Promise<A>,
+  ): Promise<A> => {
+    const saved = Object.keys(globals).map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+    )
+    for (const [key, value] of Object.entries(globals)) {
+      Object.defineProperty(globalThis, key, { value, configurable: true, writable: true })
+    }
+    try {
+      return await f()
+    } finally {
+      for (const [key, descriptor] of saved) {
+        if (descriptor === undefined) Reflect.deleteProperty(globalThis, key)
+        else Object.defineProperty(globalThis, key, descriptor)
+      }
+    }
+  }
+
+  it('keeps the host exit when reading the environment throws', async () => {
+    const hostile = {
+      get env(): never {
+        throw new Error('NotCapable: Requires env access')
+      },
+    }
+    const { value, messages, logs } = await withGlobals({ process: hostile }, () =>
+      withCollector(Effect.succeed('host-ok').pipe(Effect.withSpan('work'))),
+    )
+    expect(value).toBe('host-ok')
+    expect(messages).toStrictEqual([])
+    expect(logs.some((log) => log.includes('could not be read'))).toBe(true)
+  })
+
+  it('asks Deno for env permission without requesting it, and reads only when granted', async () => {
+    for (const [state, env, expected] of [
+      ['prompt', {}, 'disabled'],
+      ['denied', {}, 'disabled'],
+      ['granted', {}, 'uuid'],
+      ['granted', { EFFECT_INSPECT_SESSION_ID: 'deno-1' }, 'deno-1'],
+    ] as const) {
+      const queried: Array<unknown> = []
+      let envRead = false
+      const deno = {
+        permissions: {
+          querySync: (descriptor: unknown) => {
+            queried.push(descriptor)
+            return { state }
+          },
+          // Requesting is what prompts; it must never happen.
+          requestSync: () => {
+            throw new Error('requested a permission')
+          },
+        },
+      }
+      const process = {
+        get env() {
+          envRead = true
+          return env
+        },
+      }
+      const { value, messages, logs } = await withGlobals({ process, Deno: deno }, () =>
+        withCollector(Effect.succeed('host-ok').pipe(Effect.withSpan('work'))),
+      )
+      expect(value).toBe('host-ok')
+      expect(queried).toStrictEqual([{ name: 'env', variable: 'EFFECT_INSPECT_SESSION_ID' }])
+      expect(envRead).toBe(state === 'granted')
+      const sent = hellos(messages).map((hello) => hello.sessionId)
+      if (expected === 'disabled') {
+        expect(messages).toStrictEqual([])
+        expect(logs.some((log) => log.includes(`env access is ${state}`))).toBe(true)
+      } else {
+        expect(sent).toHaveLength(1)
+        expect(sent[0]).toMatch(expected === 'uuid' ? uuid : expected)
+      }
+    }
+  })
+
+  it('lets the option win over a set-but-empty variable', async () => {
+    const { messages } = await withCollector(traced, {
+      sessionId: 'explicit-1',
+      env: { EFFECT_INSPECT_SESSION_ID: '' },
+    })
+    expect(hellos(messages).map((hello) => hello.sessionId)).toStrictEqual(['explicit-1'])
+  })
+
+  it('accepts readable IDs and rejects colons, so none can pose as a loaded file', () => {
+    for (const id of ['checkout-before-1', 'agent_a.run-001', 'A', 'x'.repeat(128)]) {
+      expect(isValidSessionId(id)).toBe(true)
+    }
+    for (const id of ['', 'loaded:abc', 'a:b', '-x', '.x', 'has space', 'é', 'x'.repeat(129)]) {
+      expect(isValidSessionId(id)).toBe(false)
+    }
+  })
+
+  it('sends a fresh instance id per client, distinct from the session id', async () => {
+    const first = hellos((await withCollector(traced, { sessionId: 'same-id' })).messages)[0]
+    const second = hellos((await withCollector(traced, { sessionId: 'same-id' })).messages)[0]
+    expect(first?.instanceId).toMatch(uuid)
+    expect(second?.instanceId).toMatch(uuid)
+    expect(second?.instanceId).not.toBe(first?.instanceId)
+  })
+
+  it('records nothing and warns, without failing the program, for an invalid ID', async () => {
+    for (const options of [
+      { sessionId: 'has space' },
+      { sessionId: 'loaded:abc' },
+      { env: { EFFECT_INSPECT_SESSION_ID: '-x' } },
+    ]) {
+      const { value, messages, logs } = await withCollector(
+        Effect.succeed('ok').pipe(Effect.withSpan('work')),
+        options,
+      )
+      expect(value).toBe('ok')
+      // No fallback to a generated ID: an agent querying its chosen ID must
+      // find nothing rather than someone else's run.
+      expect(messages).toStrictEqual([])
+      expect(logs.some((log) => log.includes('not a valid session ID'))).toBe(true)
+    }
+  })
+
+  it('works in a runtime with no process global', async () => {
+    const saved = globalThis.process
+    Object.defineProperty(globalThis, 'process', { value: undefined, configurable: true })
+    try {
+      const { value, messages } = await withCollector(
+        Effect.succeed('ok').pipe(Effect.withSpan('work')),
+        { sessionId: 'edge-1' },
+      )
+      expect(value).toBe('ok')
+      expect(hellos(messages)[0]).toMatchObject({ sessionId: 'edge-1', pid: 0 })
+    } finally {
+      Object.defineProperty(globalThis, 'process', { value: saved, configurable: true })
+    }
   })
 })
