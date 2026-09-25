@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'bun:test'
 import { ConfigProvider, Effect, Exit, Layer, Logger, Result } from 'effect'
 import { clientCodec } from '../protocol/Codec.ts'
-import type { ClientMessage, Hello } from '../protocol/Schema.ts'
+import { isValidSessionId, type ClientMessage, type Hello } from '../protocol/Schema.ts'
 import * as Inspect from './Inspect.ts'
 
 /**
@@ -366,10 +366,41 @@ describe('Inspect.layer session ID', () => {
     expect(hellos(messages).map((hello) => hello.sessionId)).toStrictEqual(['from-env-1'])
   })
 
-  it('generates a UUID when neither is set, and treats an empty variable as unset', async () => {
-    for (const unset of [{}, { EFFECT_INSPECT_SESSION_ID: '' }]) {
-      const { messages } = await withCollector(traced, { env: unset })
+  it('generates a UUID only when the variable is absent', async () => {
+    // Neighbouring variables share the `EFFECT_INSPECT_` prefix in the env
+    // provider's path tree; they must not read as a set-but-empty ID.
+    for (const absent of [{}, { EFFECT_INSPECT_PORT: '1', EFFECT_INSPECT_SESSION: 'x' }]) {
+      const { messages } = await withCollector(traced, { env: absent })
       expect(hellos(messages)[0]?.sessionId).toMatch(uuid)
+    }
+  })
+
+  it('records nothing and warns when the variable is set but empty', async () => {
+    const { value, messages, logs } = await withCollector(
+      Effect.succeed('ok').pipe(Effect.withSpan('work')),
+      { env: { EFFECT_INSPECT_SESSION_ID: '' } },
+    )
+    expect(value).toBe('ok')
+    expect(messages).toStrictEqual([])
+    expect(logs.some((log) => log.includes('EFFECT_INSPECT_SESSION_ID is set but empty'))).toBe(
+      true,
+    )
+  })
+
+  it('lets the option win over a set-but-empty variable', async () => {
+    const { messages } = await withCollector(traced, {
+      sessionId: 'explicit-1',
+      env: { EFFECT_INSPECT_SESSION_ID: '' },
+    })
+    expect(hellos(messages).map((hello) => hello.sessionId)).toStrictEqual(['explicit-1'])
+  })
+
+  it('accepts readable IDs and rejects colons, so none can pose as a loaded file', () => {
+    for (const id of ['checkout-before-1', 'agent_a.run-001', 'A', 'x'.repeat(128)]) {
+      expect(isValidSessionId(id)).toBe(true)
+    }
+    for (const id of ['', 'loaded:abc', 'a:b', '-x', '.x', 'has space', 'é', 'x'.repeat(129)]) {
+      expect(isValidSessionId(id)).toBe(false)
     }
   })
 
@@ -384,6 +415,7 @@ describe('Inspect.layer session ID', () => {
   it('records nothing and warns, without failing the program, for an invalid ID', async () => {
     for (const options of [
       { sessionId: 'has space' },
+      { sessionId: 'loaded:abc' },
       { env: { EFFECT_INSPECT_SESSION_ID: '-x' } },
     ]) {
       const { value, messages, logs } = await withCollector(

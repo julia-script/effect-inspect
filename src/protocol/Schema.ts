@@ -64,16 +64,18 @@ export type SessionId = Schema.Schema.Type<typeof SessionId>
 
 /** What {@link isValidSessionId} accepts, phrased for diagnostics. */
 export const sessionIdRule =
-  '1-128 characters of letters, digits, ".", "_", ":" or "-", starting with a letter or digit'
+  '1-128 ASCII letters, digits, ".", "_" or "-", starting with a letter or digit'
 
 /**
  * Whether a caller-chosen session ID is acceptable, such as `checkout-before-1`.
  *
- * Human-readable rather than UUID-shaped, but safe to pass as a shell argument
- * or file name. A generated UUID also satisfies it.
+ * Human-readable rather than UUID-shaped, and needs no quoting as a shell
+ * argument. No colon, so a chosen ID can never take the `loaded:` form the
+ * webapp gives sessions read from a saved file. A generated UUID also
+ * satisfies it.
  */
 export const isValidSessionId = (id: string): boolean =>
-  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)
+  /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(id)
 
 const sessionId = { sessionId: SessionId }
 

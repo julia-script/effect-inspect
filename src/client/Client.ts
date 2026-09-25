@@ -26,6 +26,7 @@
  */
 import {
   Config,
+  ConfigProvider,
   Context,
   Duration,
   Effect,
@@ -133,7 +134,7 @@ export interface Options {
    *
    * Use one ID per run: a second client instance announcing an ID the
    * collector already holds is refused as a collision, and its telemetry is
-   * discarded.
+   * discarded — by a collector from this release on; older ones merge them.
    */
   readonly sessionId?: string | undefined
   /** Name shown for this program in the webapp. Defaults to the entry script's file name. */
@@ -186,14 +187,31 @@ const memoryUsage = (): (() => NodeJS.MemoryUsage) | undefined => {
 }
 
 /**
+ * Whether the provider knows `EFFECT_INSPECT_SESSION_ID` but has no value for it.
+ *
+ * The environment provider reports an empty variable as missing, so this asks
+ * about its name instead: the parent path lists `ID` as a child, yet the leaf
+ * itself has no node. Keyed by the env provider's `_`-split path, so any other
+ * provider simply answers "no", and the variable is then treated as absent.
+ */
+const isSetButEmpty = Effect.gen(function* () {
+  const provider = yield* ConfigProvider.ConfigProvider
+  const parent = yield* provider.load(['EFFECT', 'INSPECT', 'SESSION'])
+  const leaf = yield* provider.load(['EFFECT', 'INSPECT', 'SESSION', 'ID'])
+  return parent?._tag === 'Record' && parent.keys.has('ID') && leaf === undefined
+}).pipe(Effect.mapError((error) => `${sessionIdEnv} could not be read: ${error.message}`))
+
+/**
  * Picks this client's session ID: the `sessionId` option, else
  * `EFFECT_INSPECT_SESSION_ID`, else a random UUID.
  *
  * Read through Effect's `ConfigProvider`, which defaults to the process
- * environment and is simply empty in a runtime without one. An empty variable
- * counts as unset. Fails with a diagnostic, rather than falling back to
- * another ID, when the chosen value is invalid or the environment cannot be
- * read — a silently substituted ID is a run nobody can find.
+ * environment and is simply empty in a runtime without one. Only an absent
+ * variable falls back to a UUID: a set-but-empty one (`ID=$UNSET_VAR`) is a
+ * launcher mistake, so it is invalid like any other bad value. Fails with a
+ * diagnostic, rather than falling back to another ID, when the chosen value is
+ * invalid or the environment cannot be read — a silently substituted ID is a
+ * run nobody can find.
  */
 const resolveSessionId = (
   options: Options | undefined,
@@ -209,6 +227,9 @@ const resolveSessionId = (
             ),
           ]
         : ['the sessionId option', Option.some(fromOption)]
+    if (Option.isNone(chosen) && (yield* isSetButEmpty)) {
+      return yield* Effect.fail(`${sessionIdEnv} is set but empty: unset it or choose an ID`)
+    }
     if (Option.isNone(chosen)) {
       // Effect's `Crypto` can fail with a PlatformError and nothing on this path
       // is allowed to fail; a session id needs uniqueness, not strength.

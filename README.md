@@ -82,10 +82,10 @@ EFFECT_INSPECT_SESSION_ID=checkout-before-1 bun my-program.ts
 ```
 
 The `sessionId` option wins over the variable; with neither, a random UUID is
-used. An empty variable counts as unset. IDs are 1–128 letters, digits, `.`,
-`_`, `:` or `-`, starting with a letter or digit. An invalid ID is not replaced
-with another one: the program runs normally, records nothing, and logs a
-warning saying why. Setting the variable does not instrument a program by
+used only when the variable is absent. IDs are 1–128 ASCII letters, digits,
+`.`, `_` or `-`, starting with a letter or digit. An invalid ID — including a
+variable that is set but empty — is not replaced with another one: the program
+runs normally, records nothing, and logs a warning saying why. Setting the variable does not instrument a program by
 itself; it still needs `Inspect.layer()`.
 
 **Use one ID per run.** The ID is kept across reconnects, but a _different_
@@ -94,7 +94,16 @@ ended — is refused as a collision: its telemetry is discarded, the original
 trace is left untouched, and the session records the refused connection in its
 `conflicts` count. Give reproduction attempts their own IDs, and remember that
 child processes inherit the variable: give each instrumented child a distinct
-value, or unset it. IDs correlate runs; they are not authentication.
+value, or remove it from the child's environment (`env -u
+EFFECT_INSPECT_SESSION_ID …`, or delete the key from the `env` passed to
+`spawn`) — setting it to an empty string disables recording instead. IDs
+correlate runs; they are not authentication.
+
+Collision refusal needs a collector from this release or later. It tells runs
+apart by a per-client instance ID that older clients do not send, so an older
+client is treated as one run per ID and reconnects as before. An older
+collector ignores the instance ID and merges runs that reuse an ID into one
+session.
 
 ## Saving and loading traces
 
