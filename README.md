@@ -66,9 +66,35 @@ Options, all optional:
 Inspect.layer({
   url: 'ws://localhost:34437', // where the collector listens
   programName: 'my-service', // what the session list shows; defaults to the entry script's file name
+  sessionId: 'checkout-before-1', // see "Choosing the session ID"; defaults to a random UUID
   bufferSize: 131072, // outbound queue, in messages (~34 MB at the measured mean)
 })
 ```
+
+### Choosing the session ID
+
+A launcher — you, a script, or a coding agent — can pick the session ID before
+starting an already instrumented program, so it can find that exact run later
+without searching the session list:
+
+```bash
+EFFECT_INSPECT_SESSION_ID=checkout-before-1 bun my-program.ts
+```
+
+The `sessionId` option wins over the variable; with neither, a random UUID is
+used. An empty variable counts as unset. IDs are 1–128 letters, digits, `.`,
+`_`, `:` or `-`, starting with a letter or digit. An invalid ID is not replaced
+with another one: the program runs normally, records nothing, and logs a
+warning saying why. Setting the variable does not instrument a program by
+itself; it still needs `Inspect.layer()`.
+
+**Use one ID per run.** The ID is kept across reconnects, but a _different_
+run announcing an ID the collector already holds — even one whose run has
+ended — is refused as a collision: its telemetry is discarded, the original
+trace is left untouched, and the session records the refused connection in its
+`conflicts` count. Give reproduction attempts their own IDs, and remember that
+child processes inherit the variable: give each instrumented child a distinct
+value, or unset it. IDs correlate runs; they are not authentication.
 
 ## Saving and loading traces
 

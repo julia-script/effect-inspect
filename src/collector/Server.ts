@@ -95,6 +95,8 @@ const handleClient = Effect.fnUntraced(function* (socket: Socket.Socket) {
   const store = yield* Store
   const pull = yield* readerFor(socket)
   const writer = yield* socket.writer
+  /** This connection's identity, so the store can tell it from a collision. */
+  const connection = Symbol('connection')
   /** The session this connection belongs to, learned from its `Hello`. */
   let sessionId: Protocol.SessionId | undefined
 
@@ -103,7 +105,7 @@ const handleClient = Effect.fnUntraced(function* (socket: Socket.Socket) {
       sessionId = message.sessionId
       switch (message._tag) {
         case 'Hello':
-          yield* store.hello(message)
+          yield* store.hello(message, connection)
           return
         case 'Ping':
           // A failed write means the client is gone; the read loop notices.
@@ -112,17 +114,20 @@ const handleClient = Effect.fnUntraced(function* (socket: Socket.Socket) {
           )
           return
         default:
-          yield* store.append(message)
+          yield* store.append(message, connection)
       }
     })
 
   yield* readLines(pull, clientCodec.decode, onMessage, () =>
-    Effect.suspend(() => store.skipLine(sessionId)),
+    Effect.suspend(() => store.skipLine(sessionId, connection)),
   ).pipe(
     // However the connection ends — clean close, crash, kill -9 — the session
-    // is marked ended. A reconnect with the same id resumes it.
+    // is marked ended, if this connection still owns it. A reconnect from the
+    // same client instance resumes it.
     Effect.ensuring(
-      Effect.suspend(() => (sessionId === undefined ? Effect.void : store.end(sessionId))),
+      Effect.suspend(() =>
+        sessionId === undefined ? Effect.void : store.end(sessionId, connection),
+      ),
     ),
   )
 })

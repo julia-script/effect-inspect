@@ -53,9 +53,27 @@ export const Json: Schema.Codec<Json> = Schema.Union([
 export const Attributes = Schema.Record(Schema.String, Json)
 export type Attributes = Schema.Schema.Type<typeof Attributes>
 
-/** Identifies one run of an instrumented program. */
+/**
+ * Identifies one run of an instrumented program.
+ *
+ * Any string on the wire, so traces from older clients keep decoding. IDs a
+ * caller chooses are held to {@link isValidSessionId} by the client instead.
+ */
 export const SessionId = Schema.String
 export type SessionId = Schema.Schema.Type<typeof SessionId>
+
+/** What {@link isValidSessionId} accepts, phrased for diagnostics. */
+export const sessionIdRule =
+  '1-128 characters of letters, digits, ".", "_", ":" or "-", starting with a letter or digit'
+
+/**
+ * Whether a caller-chosen session ID is acceptable, such as `checkout-before-1`.
+ *
+ * Human-readable rather than UUID-shaped, but safe to pass as a shell argument
+ * or file name. A generated UUID also satisfies it.
+ */
+export const isValidSessionId = (id: string): boolean =>
+  /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)
 
 const sessionId = { sessionId: SessionId }
 
@@ -98,6 +116,13 @@ export const Hello = Schema.Struct({
   runtime: Schema.String,
   protocolVersion: Schema.Natural,
   clock: Clock,
+  /**
+   * Random per client instance, fixed for its lifetime and re-sent on every
+   * reconnect. Tells a genuine reconnect (same instance) from an independent
+   * run that chose the same `sessionId`. Absent from older clients, which are
+   * treated as one instance per `sessionId`.
+   */
+  instanceId: Schema.optional(Schema.String),
 })
 export type Hello = Schema.Schema.Type<typeof Hello>
 
@@ -350,6 +375,12 @@ export const Session = Schema.Struct({
   clock: Clock,
   active: Schema.Boolean,
   endedAtEpochMillis: Schema.optional(Schema.Natural),
+  /**
+   * Connections refused because a different client instance announced this
+   * `sessionId` — an ID collision. Their telemetry was discarded, so this
+   * session holds only the first instance's run. Absent when there were none.
+   */
+  conflicts: Schema.optional(Schema.Natural),
 })
 export type Session = Schema.Schema.Type<typeof Session>
 

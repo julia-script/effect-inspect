@@ -8,9 +8,9 @@
 // oxlint-disable effecttsgo/lazy-promise-in-effect-sync
 // oxlint-disable typescript/no-floating-promises
 import { describe, expect, it } from 'bun:test'
-import { Effect, Exit, Result } from 'effect'
+import { ConfigProvider, Effect, Exit, Layer, Logger, Result } from 'effect'
 import { clientCodec } from '../protocol/Codec.ts'
-import type { ClientMessage } from '../protocol/Schema.ts'
+import type { ClientMessage, Hello } from '../protocol/Schema.ts'
 import * as Inspect from './Inspect.ts'
 
 /**
@@ -19,11 +19,21 @@ import * as Inspect from './Inspect.ts'
  *
  * The server is real rather than a stubbed `Socket`, because most of what this
  * layer promises is about a socket's failure modes.
+ *
+ * The environment is `env` (empty by default) rather than the real one, so an
+ * `EFFECT_INSPECT_SESSION_ID` in the shell running the tests cannot leak in.
+ * Logs are captured in place of the console.
  */
 const withCollector = async <A>(
   program: Effect.Effect<A, never, never>,
-  options?: Inspect.Options,
-): Promise<{ readonly value: A; readonly messages: ReadonlyArray<ClientMessage> }> => {
+  options?: Inspect.Options & { readonly env?: Record<string, string> },
+): Promise<{
+  readonly value: A
+  readonly messages: ReadonlyArray<ClientMessage>
+  readonly logs: ReadonlyArray<string>
+}> => {
+  const { env, ...layerOptions } = options ?? {}
+  const logs: Array<string> = []
   const lines: Array<string> = []
   let received: (() => void) | undefined
   const server = Bun.serve({
@@ -40,7 +50,22 @@ const withCollector = async <A>(
   try {
     const value = await Effect.runPromise(
       program.pipe(
-        Effect.provide(Inspect.layer({ ...options, url: `ws://localhost:${server.port}` })),
+        // The capturing logger is provided *to* the inspect layer, so a warning
+        // logged while it is built is captured too.
+        Effect.provide(
+          Layer.provide(
+            Inspect.layer({ ...layerOptions, url: `ws://localhost:${server.port}` }),
+            Logger.layer([
+              Logger.make(({ message }) => {
+                logs.push(String(message))
+              }),
+            ]),
+          ),
+        ),
+        Effect.provideService(
+          ConfigProvider.ConfigProvider,
+          ConfigProvider.fromEnv({ env: env ?? {} }),
+        ),
       ),
     )
     // The layer's scope closes with the program, but delivery is asynchronous:
@@ -52,7 +77,7 @@ const withCollector = async <A>(
     const messages = lines.flatMap((line) =>
       Result.getOrElse(clientCodec.decodeAll(line), () => [] as ReadonlyArray<ClientMessage>),
     )
-    return { value, messages }
+    return { value, messages, logs }
   } finally {
     server.stop(true)
   }
@@ -160,6 +185,11 @@ describe('Inspect.layer', () => {
     // The reconnect re-announces the session rather than starting a new one.
     expect(second[0]?._tag).toBe('Hello')
     expect(second[0]?.sessionId).toBe(first[0]!.sessionId)
+    // As the same client instance, so the collector resumes rather than refuses.
+    const instanceOf = (message: ClientMessage | undefined) =>
+      message?._tag === 'Hello' ? message.instanceId : undefined
+    expect(instanceOf(first[0])).toBeString()
+    expect(instanceOf(second[0])).toBe(instanceOf(first[0]))
     // And telemetry emitted after the restart reaches the new collector.
     expect(second.some((message) => message._tag === 'SpanStart')).toBe(true)
   }, 10_000)
@@ -315,5 +345,71 @@ describe('Inspect.layer', () => {
         message._tag === 'Log' && message.annotations['effect_inspect.dropped'] !== undefined,
     )
     expect(dropped).toBeDefined()
+  })
+})
+
+describe('Inspect.layer session ID', () => {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  const hellos = (messages: ReadonlyArray<ClientMessage>): ReadonlyArray<Hello> =>
+    messages.filter((message) => message._tag === 'Hello')
+  const env = { EFFECT_INSPECT_SESSION_ID: 'from-env-1' }
+  const traced = Effect.void.pipe(Effect.withSpan('work'))
+
+  it('prefers the sessionId option over the environment', async () => {
+    const { messages } = await withCollector(traced, { sessionId: 'checkout-before-1', env })
+    expect(messages.every((message) => message.sessionId === 'checkout-before-1')).toBe(true)
+    expect(messages.some((message) => message._tag === 'SpanStart')).toBe(true)
+  })
+
+  it('reads EFFECT_INSPECT_SESSION_ID when no option is given', async () => {
+    const { messages } = await withCollector(traced, { env })
+    expect(hellos(messages).map((hello) => hello.sessionId)).toStrictEqual(['from-env-1'])
+  })
+
+  it('generates a UUID when neither is set, and treats an empty variable as unset', async () => {
+    for (const unset of [{}, { EFFECT_INSPECT_SESSION_ID: '' }]) {
+      const { messages } = await withCollector(traced, { env: unset })
+      expect(hellos(messages)[0]?.sessionId).toMatch(uuid)
+    }
+  })
+
+  it('sends a fresh instance id per client, distinct from the session id', async () => {
+    const first = hellos((await withCollector(traced, { sessionId: 'same-id' })).messages)[0]
+    const second = hellos((await withCollector(traced, { sessionId: 'same-id' })).messages)[0]
+    expect(first?.instanceId).toMatch(uuid)
+    expect(second?.instanceId).toMatch(uuid)
+    expect(second?.instanceId).not.toBe(first?.instanceId)
+  })
+
+  it('records nothing and warns, without failing the program, for an invalid ID', async () => {
+    for (const options of [
+      { sessionId: 'has space' },
+      { env: { EFFECT_INSPECT_SESSION_ID: '-x' } },
+    ]) {
+      const { value, messages, logs } = await withCollector(
+        Effect.succeed('ok').pipe(Effect.withSpan('work')),
+        options,
+      )
+      expect(value).toBe('ok')
+      // No fallback to a generated ID: an agent querying its chosen ID must
+      // find nothing rather than someone else's run.
+      expect(messages).toStrictEqual([])
+      expect(logs.some((log) => log.includes('not a valid session ID'))).toBe(true)
+    }
+  })
+
+  it('works in a runtime with no process global', async () => {
+    const saved = globalThis.process
+    Object.defineProperty(globalThis, 'process', { value: undefined, configurable: true })
+    try {
+      const { value, messages } = await withCollector(
+        Effect.succeed('ok').pipe(Effect.withSpan('work')),
+        { sessionId: 'edge-1' },
+      )
+      expect(value).toBe('ok')
+      expect(hellos(messages)[0]).toMatchObject({ sessionId: 'edge-1', pid: 0 })
+    } finally {
+      Object.defineProperty(globalThis, 'process', { value: saved, configurable: true })
+    }
   })
 })
