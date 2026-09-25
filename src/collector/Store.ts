@@ -31,6 +31,11 @@ export interface SessionSnapshot {
   readonly droppedMessages: number
   /** Lines received for this session that could not be decoded. */
   readonly skippedLines: number
+  /**
+   * Whether the owner sent an instance ID, so a reused ID is refused and
+   * counted. `false` for an older client: a reused ID would have merged.
+   */
+  readonly conflictDetection: boolean
 }
 
 /**
@@ -220,6 +225,7 @@ export const make = Effect.fnUntraced(function* (options?: { readonly capacity?:
             : state.ring.slice(state.head).concat(state.ring.slice(0, state.head)),
         droppedMessages: state.droppedMessages,
         skippedLines: state.skippedLines,
+        conflictDetection: state.instanceId !== undefined,
       }
     })
 

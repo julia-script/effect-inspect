@@ -455,6 +455,24 @@ export const WebappRequest = Schema.Union([Subscribe, Unsubscribe])
 export type WebappRequest = Schema.Schema.Type<typeof WebappRequest>
 
 /**
+ * Collector-side loss counters for one session at snapshot time, carried in
+ * a trace file exported from the collector.
+ */
+export const TraceCapture = Schema.Struct({
+  /** Messages evicted by the collector's per-session capacity bound. */
+  droppedMessages: Schema.Natural,
+  /** Lines received for the session that could not be decoded. */
+  skippedLines: Schema.Natural,
+  /**
+   * Whether the collector could refuse an independent run reusing this ID.
+   * `false` when the owning client predates instance IDs, so a reused ID
+   * would have merged silently and `session.conflicts` proves nothing.
+   */
+  conflictDetection: Schema.Boolean,
+})
+export type TraceCapture = Schema.Schema.Type<typeof TraceCapture>
+
+/**
  * Line 1 of a saved trace file.
  *
  * The rest of the file is {@link ClientMessage} NDJSON, byte-identical to what
@@ -474,6 +492,13 @@ export const TraceFileHeader = Schema.Struct({
   protocolVersion: Schema.Natural,
   session: Session,
   savedAtEpochMillis: Schema.Natural,
+  /**
+   * What the collector knew about loss when the file was exported from it.
+   * Absent from browser saves and older files: their capture completeness is
+   * unknown, not complete. Optional and additive, so older builds, which
+   * ignore unknown header keys, still read these files.
+   */
+  capture: Schema.optional(TraceCapture),
 })
 export type TraceFileHeader = Schema.Schema.Type<typeof TraceFileHeader>
 

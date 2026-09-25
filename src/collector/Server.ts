@@ -12,6 +12,7 @@ import { HttpServer, HttpServerRequest, HttpServerResponse } from 'effect/unstab
 import { Socket } from 'effect/unstable/socket'
 import { clientCodec, collectorCodec, webappCodec, webappRequestCodec } from '../protocol/Codec.ts'
 import type * as Protocol from '../protocol/Schema.ts'
+import * as QueryApi from './QueryApi.ts'
 import { Store } from './Store.ts'
 
 /** Path a webapp client connects on; anything else is an instrumented program. */
@@ -218,14 +219,16 @@ export const handleConnection = (
 ): Effect.Effect<void, never, Store> =>
   Effect.scoped(path === webappPath ? handleWebapp(socket) : handleClient(socket))
 
-/** Serves instrumented clients, webapp sockets, and the bundled web UI. */
+/** Serves instrumented clients, webapp sockets, the query API and the bundled web UI. */
 export const run = (fetch?: (request: Request) => Promise<Response>) =>
   Effect.gen(function* () {
     const server = yield* HttpServer.HttpServer
     yield* server.serve(
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
-        const path = new URL(request.url, 'http://localhost').pathname
+        const url = new URL(request.url, 'http://localhost')
+        const path = url.pathname
+        if (path.startsWith(QueryApi.apiPath)) return yield* QueryApi.handle(request, url)
         if (request.headers.upgrade?.toLowerCase() === 'websocket') {
           const socket = yield* request.upgrade
           yield* handleConnection(socket, path)
@@ -238,7 +241,7 @@ export const run = (fetch?: (request: Request) => Promise<Response>) =>
         }
         const response = yield* Effect.promise(() =>
           fetch(
-            new Request(new URL(request.url, 'http://localhost').href, {
+            new Request(url.href, {
               method: request.method,
               headers: request.headers,
             }),
