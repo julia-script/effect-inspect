@@ -72,29 +72,34 @@ export const query = (
   request: unknown,
 ): Effect.Effect<Query.QueryResponse, never, HttpClient.HttpClient> => {
   const op = opOf(request)
-  return withTimeout(
-    options,
-    op,
-    Effect.gen(function* () {
-      const client = yield* HttpClient.HttpClient
-      const response = yield* client.execute(
-        HttpClientRequest.post(new URL('/api/v1/query', options.url)).pipe(
-          HttpClientRequest.bodyJsonUnsafe(request),
-        ),
-      )
-      const body = yield* response.json
-      return isResponse(body)
-        ? body
-        : foreign(op, options.url, `unexpected body (HTTP ${response.status})`)
-    }).pipe(
-      Effect.catchTag('HttpClientError', (error) =>
-        Effect.succeed(
-          error.reason._tag === 'TransportError' || error.reason._tag === 'InvalidUrlError'
-            ? unavailable(op, options.url, error.message)
-            : foreign(op, options.url, error.message),
+  // Bounded here too: a failure built from a long URL, or an oversized body
+  // from a collector that does not enforce the bound, must not escape it.
+  return Effect.map(
+    withTimeout(
+      options,
+      op,
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient
+        const response = yield* client.execute(
+          HttpClientRequest.post(new URL('/api/v1/query', options.url)).pipe(
+            HttpClientRequest.bodyJsonUnsafe(request),
+          ),
+        )
+        const body = yield* response.json
+        return isResponse(body)
+          ? body
+          : foreign(op, options.url, `unexpected body (HTTP ${response.status})`)
+      }).pipe(
+        Effect.catchTag('HttpClientError', (error) =>
+          Effect.succeed(
+            error.reason._tag === 'TransportError' || error.reason._tag === 'InvalidUrlError'
+              ? unavailable(op, options.url, error.message)
+              : foreign(op, options.url, error.message),
+          ),
         ),
       ),
     ),
+    Query.limitResponse,
   )
 }
 
@@ -110,32 +115,37 @@ export const exportTrace = (
   never,
   HttpClient.HttpClient
 > =>
-  withTimeout(
-    options,
-    'export',
-    Effect.gen(function* () {
-      const client = yield* HttpClient.HttpClient
-      const url = new URL('/api/v1/export', options.url)
-      url.searchParams.set('sessionId', sessionId)
-      const response = yield* client.execute(HttpClientRequest.get(url))
-      // An older collector hands unknown paths to the web UI, which may answer 200 HTML.
-      if (
-        response.status === 200 &&
-        response.headers['content-type']?.startsWith('application/x-ndjson') === true
-      ) {
-        return { ok: true as const, text: yield* response.text }
-      }
-      const body = yield* response.json
-      return isResponse(body) && !body.ok
-        ? body
-        : foreign('export', options.url, `unexpected body (HTTP ${response.status})`)
-    }).pipe(
-      Effect.catchTag('HttpClientError', (error) =>
-        Effect.succeed(
-          error.reason._tag === 'TransportError' || error.reason._tag === 'InvalidUrlError'
-            ? unavailable('export', options.url, error.message)
-            : foreign('export', options.url, error.message),
+  Effect.map(
+    withTimeout(
+      options,
+      'export',
+      Effect.gen(function* () {
+        const client = yield* HttpClient.HttpClient
+        const url = new URL('/api/v1/export', options.url)
+        url.searchParams.set('sessionId', sessionId)
+        const response = yield* client.execute(HttpClientRequest.get(url))
+        // An older collector hands unknown paths to the web UI, which may answer 200 HTML.
+        if (
+          response.status === 200 &&
+          response.headers['content-type']?.startsWith('application/x-ndjson') === true
+        ) {
+          return { ok: true as const, text: yield* response.text }
+        }
+        const body = yield* response.json
+        return isResponse(body) && !body.ok
+          ? body
+          : foreign('export', options.url, `unexpected body (HTTP ${response.status})`)
+      }).pipe(
+        Effect.catchTag('HttpClientError', (error) =>
+          Effect.succeed(
+            error.reason._tag === 'TransportError' || error.reason._tag === 'InvalidUrlError'
+              ? unavailable('export', options.url, error.message)
+              : foreign('export', options.url, error.message),
+          ),
         ),
       ),
     ),
+    // The trace text is a lossless artifact and deliberately unbounded;
+    // only failures are held to the JSON response bound.
+    (result) => (result.ok ? result : Query.limitResponse(result)),
   )

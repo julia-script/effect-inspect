@@ -52,6 +52,21 @@ export const limits = {
   stackChars: 4000,
   /** Characters of a log message. */
   logMessageChars: 2000,
+  /** Characters of a span, event or group name, a log's span name, or a program/runtime. */
+  nameChars: 200,
+  /** Characters of one attribute or annotation key. */
+  keyChars: 100,
+  /** Characters of an error `message`. */
+  errorMessageChars: 1000,
+  /** Longest `sessionId`, `spanId` or `name` a request may carry. */
+  requestTextChars: 1024,
+  /**
+   * UTF-8 bytes of a whole serialized JSON response, envelope included. A
+   * response that would be larger is replaced by `ResponseTooLarge`.
+   * Identifiers are never shortened to fit. `.eitrace` export is a lossless
+   * artifact transfer, not a query response, and is not held to this.
+   */
+  responseBytes: 1_048_576,
 } as const
 
 // ---------------------------------------------------------------------------
@@ -146,7 +161,8 @@ export const fromTraceFile = (
 
 const pageSize = (max: number) => Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: max }))
 const Millis = Schema.Finite
-const sessionId = Schema.optional(Schema.String)
+const RequestText = Schema.String.check(Schema.isMaxLength(limits.requestTextChars))
+const sessionId = Schema.optional(RequestText)
 
 /** Span status values a span can have. */
 export const spanStatuses = ['ok', 'error', 'defect', 'interrupted', 'open'] as const
@@ -185,7 +201,7 @@ export const SpansRequest = Schema.Struct({
   sessionId,
   status: Schema.optional(StatusFilter),
   /** Case-insensitive substring of the span name. */
-  name: Schema.optional(Schema.String),
+  name: Schema.optional(RequestText),
   /** Only spans whose duration (or, while open, elapsed lower bound) is at least this. */
   minDurationMs: Schema.optional(Millis.check(Schema.isGreaterThanOrEqualTo(0))),
   /** Only spans overlapping `[fromMs, toMs]`. Timings are not clipped to it. */
@@ -200,7 +216,7 @@ export const SpansRequest = Schema.Struct({
 export const SpanRequest = Schema.Struct({
   op: Schema.Literal('span'),
   sessionId,
-  spanId: Schema.String,
+  spanId: RequestText,
   children: Schema.optional(pageSize(limits.children.max)),
   events: Schema.optional(pageSize(limits.events.max)),
 })
@@ -209,8 +225,8 @@ export const SpanRequest = Schema.Struct({
 export const LogsRequest = Schema.Struct({
   op: Schema.Literal('logs'),
   sessionId,
-  spanId: Schema.optional(Schema.String),
-  /** With `spanId`: that span's own logs, or its whole subtree's (default). */
+  spanId: Schema.optional(RequestText),
+  /** Requires `spanId`: that span's own logs, or its whole subtree's (default). */
   scope: Schema.optional(LogScope),
   minLevel: Schema.optional(MinLevel),
   fromMs: Schema.optional(Millis),
@@ -242,25 +258,28 @@ export const decodeRequest = (input: unknown): Result.Result<QueryRequest, Query
     typeof (input as { op?: unknown }).op === 'string'
       ? (input as { op: string }).op
       : null
-  return Result.flatMap(
-    Result.mapError(decodeQuery(input), (error) =>
-      failure(op, 'InvalidRequest', error.message, 'Fix the request; see the documented fields.'),
-    ),
-    (request) =>
-      'fromMs' in request &&
-      request.fromMs !== undefined &&
-      request.toMs !== undefined &&
-      request.fromMs > request.toMs
-        ? Result.fail(
-            failure(
-              op,
-              'InvalidRequest',
-              'fromMs must not be after toMs.',
-              'Swap or fix the range.',
-            ),
-          )
-        : Result.succeed(request),
-  )
+  const invalid = (message: string, hint: string) =>
+    Result.fail(failure(op, 'InvalidRequest', message, hint))
+  const decoded = decodeQuery(input)
+  if (Result.isFailure(decoded)) {
+    return invalid(decoded.failure.message, 'Fix the request; see the documented fields.')
+  }
+  const request = decoded.success
+  if (
+    'fromMs' in request &&
+    request.fromMs !== undefined &&
+    request.toMs !== undefined &&
+    request.fromMs > request.toMs
+  ) {
+    return invalid('fromMs must not be after toMs.', 'Swap or fix the range.')
+  }
+  if (request.op === 'logs' && request.scope !== undefined && request.spanId === undefined) {
+    return invalid(
+      'scope applies only with spanId; it was given without one.',
+      'Add spanId to correlate logs with a span, or drop scope to list all logs.',
+    )
+  }
+  return Result.succeed(request)
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +294,7 @@ export type ErrorTag =
   | 'TraceFileError'
   | 'CollectorUnavailable'
   | 'CollectorError'
+  | 'ResponseTooLarge'
 
 /** Every failed query, whatever the source or transport. */
 export interface QueryFailure {
@@ -290,27 +310,77 @@ export interface QueryFailure {
   }
 }
 
+/** Operations a response may name; anything else is echoed as `null`. */
+const knownOps: ReadonlySet<string> = new Set([
+  'sessions',
+  'summary',
+  'spans',
+  'span',
+  'logs',
+  'export',
+])
+
+/**
+ * A failure response. `op` is echoed only when it is a known operation and
+ * `message` is cut to `errorMessageChars`, so untrusted input cannot inflate it.
+ */
 export const failure = (
   op: string | null,
   tag: ErrorTag,
   message: string,
   hint: string,
   details?: Record<string, unknown>,
-): QueryFailure => ({
-  ok: false,
-  apiVersion,
-  op,
-  error: { ...details, _tag: tag, message, hint },
-})
+): QueryFailure => {
+  const { text, truncated } = cut(message, limits.errorMessageChars)
+  return {
+    ok: false,
+    apiVersion,
+    op: op !== null && knownOps.has(op) ? op : null,
+    error: {
+      ...details,
+      _tag: tag,
+      message: text,
+      ...(truncated ? { messageTruncated: true } : {}),
+      hint,
+    },
+  }
+}
+
+const encoder = new TextEncoder()
+
+/**
+ * Enforces {@link limits.responseBytes} on a complete response. An oversized
+ * response, success or failure, becomes a small fixed-shape
+ * `ResponseTooLarge` failure that echoes no caller text.
+ */
+export const limitResponse = <R extends QueryResponse>(response: R): R | QueryFailure => {
+  const bytes = encoder.encode(JSON.stringify(response)).length
+  if (bytes <= limits.responseBytes) return response
+  return failure(
+    response.op,
+    'ResponseTooLarge',
+    `The response would be ${bytes} bytes of JSON, over the ${limits.responseBytes}-byte limit.`,
+    'Request fewer items (limit, top, children, events) or narrow the filters (status, name, minDurationMs, fromMs/toMs, minLevel, spanId/scope). Identifiers are never shortened, so extremely long IDs can make even a small page too large; export the trace and inspect the file directly.',
+    {
+      bytes,
+      limitBytes: limits.responseBytes,
+      originalOutcome: response.ok ? 'ok' : response.error._tag,
+    },
+  )
+}
 
 /** Which session answered, and from where. */
 export interface SourceInfo {
   readonly kind: 'live' | 'file'
   readonly file: string | null
   readonly sessionId: string
+  /** Cut to `nameChars`. */
   readonly program: string
+  readonly programTruncated: boolean
   readonly pid: number
+  /** Cut to `nameChars`. */
   readonly runtime: string
+  readonly runtimeTruncated: boolean
   /** Live: the client was still connected at snapshot time, so more may arrive. */
   readonly active: boolean
   /** Wall clock of the session's time origin (`startMs` 0). */
@@ -326,19 +396,22 @@ export interface TimeInfo {
   /**
    * `sessionStart`: milliseconds since the session's clock origin, taken when
    * its inspect client started. Wall clock = `startedAtEpochMillis + ms`.
-   * Monotonic, so comparable within a session only.
+   * Monotonic, so comparable within a session only. Values can be negative:
+   * work that started before the inspect client did.
    */
   readonly reference: 'sessionStart'
-  /** Earliest retained timestamp, or `null` with no timed data. */
+  /** Earliest retained timestamp (span start/end, event, log, memory), or `null` with no timed data. */
   readonly observedFromMs: number | null
-  /** Latest retained timestamp. Open spans are measured up to here. */
+  /** Latest retained timestamp, or `null` with no timed data. Open spans are measured up to here. */
   readonly observedUntilMs: number | null
 }
 
 /**
  * What the evidence may be missing. `status`:
- * - `lossRecorded`: at least one counter below is non-zero.
- * - `noLossRecorded`: collector counters are known and every counter is 0.
+ * - `lossRecorded`: at least one loss or gap counter below
+ *   (`collectorDroppedMessages` … `spansMissingParent`) is non-zero.
+ * - `noLossRecorded`: collector counters are known and every loss or gap
+ *   counter is 0.
  *   Not proof of completeness — only what was measured.
  * - `unknown`: nothing was recorded as lost, but the source never kept the
  *   collector counters (a browser save or older file).
@@ -353,8 +426,14 @@ export interface Completeness {
   readonly clientDroppedMessages: number
   /** Undecodable trailing lines of a file (a cut-short save). */
   readonly fileTruncatedLines: number
-  /** Span ids with a retained end or event but no retained start. */
+  /** Distinct span ids with a retained end or event but no retained start anywhere. */
   readonly spansMissingStart: number
+  /**
+   * Distinct span ids whose end or event arrived before their retained start.
+   * That end or event is not applied, so the span can read as open or lack
+   * events. A single client does not send this order.
+   */
+  readonly spansOutOfOrder: number
   /** Spans whose local parent span is not retained. */
   readonly spansMissingParent: number
   /** Spans with no recorded end: still running, or their end was never received. */
@@ -400,9 +479,13 @@ export interface ErrorInfo {
  * `elapsedLowerBoundMs` says how long it had been open by `observedUntilMs`.
  */
 export interface SpanItem {
+  /** Exact, never shortened. */
   readonly spanId: string
+  /** Exact, never shortened. */
   readonly traceId: string
+  /** Cut to `nameChars`. */
   readonly name: string
+  readonly nameTruncated: boolean
   readonly kind: Protocol.SpanKind
   /** Local parent id, or `null` for a root or externally-parented span. */
   readonly parentSpanId: string | null
@@ -423,11 +506,22 @@ export interface SpanItem {
   readonly error: ErrorInfo | null
 }
 
-/** A JSON object cut down to a bounded size. */
+/**
+ * A JSON object cut down to a bounded size, as entries in the source's key
+ * order. Entries (not an object) so two keys cut to the same prefix stay apart.
+ */
 export interface BoundedAttributes {
-  readonly values: Record<string, Protocol.Json>
-  /** Keys whose value was replaced by the first `valueChars` of its JSON encoding. */
-  readonly truncatedKeys: ReadonlyArray<string>
+  readonly entries: ReadonlyArray<{
+    /** Cut to `keyChars`. */
+    readonly key: string
+    readonly keyTruncated: boolean
+    /**
+     * The value; if its JSON encoding exceeds `valueChars`, the first
+     * `valueChars` characters of that encoding, as a string.
+     */
+    readonly value: Protocol.Json
+    readonly valueTruncated: boolean
+  }>
   /** Keys dropped beyond the first `attributeKeys`. */
   readonly omittedKeys: number
 }
@@ -435,6 +529,7 @@ export interface BoundedAttributes {
 export interface SpanRef {
   readonly spanId: string
   readonly name: string
+  readonly nameTruncated: boolean
   readonly status: SpanStatus
   readonly startMs: number
   readonly durationMs: number | null
@@ -460,7 +555,9 @@ export interface SpanDetail extends SpanItem {
   readonly events: {
     readonly total: number
     readonly items: ReadonlyArray<{
+      /** Cut to `nameChars`. */
       readonly name: string
+      readonly nameTruncated: boolean
       readonly timeMs: number
       readonly attributes: BoundedAttributes
     }>
@@ -474,7 +571,9 @@ export interface LogItem {
   readonly message: string
   readonly messageTruncated: boolean
   readonly spanId: string | null
+  /** The span's name cut to `nameChars`, or `null` when unknown or not retained. */
   readonly spanName: string | null
+  readonly spanNameTruncated: boolean
   readonly fiberId: number | null
   readonly annotations: BoundedAttributes
 }
@@ -489,7 +588,9 @@ export interface Page<A> {
 }
 
 export interface NameGroup {
+  /** Cut to `nameChars`; groups are formed on the full name. */
   readonly name: string
+  readonly nameTruncated: boolean
   readonly count: number
   readonly completed: number
   readonly open: number
@@ -536,8 +637,10 @@ export interface Summary {
 export type SessionsResult = Page<{
   readonly sessionId: string
   readonly program: string
+  readonly programTruncated: boolean
   readonly pid: number
   readonly runtime: string
+  readonly runtimeTruncated: boolean
   readonly active: boolean
   readonly startedAtEpochMillis: number
   readonly endedAtEpochMillis: number | null
@@ -558,9 +661,33 @@ export type SessionsResponse = Success<'sessions', SessionsResult> & {
   readonly source: { readonly kind: 'live' | 'file'; readonly file: string | null }
 }
 export type SummaryResponse = Success<'summary', Summary> & Context
-export type SpansResponse = Success<'spans', Page<SpanItem>> & Context
+/**
+ * How `fromMs`/`toMs` were applied to `spans`, or `null` without either:
+ * spans whose `[startMs, endMs]` (open: `[startMs, observedUntilMs]`)
+ * overlaps `[fromMs, toMs]`, bounds inclusive, are selected, and their
+ * timings are for the whole span, not clipped to the window.
+ */
+export interface SpanWindow {
+  readonly fromMs: number | null
+  readonly toMs: number | null
+  readonly match: 'overlap'
+  readonly inclusive: true
+  readonly timings: 'fullSpan'
+}
+
+/** How `fromMs`/`toMs` were applied to `logs`: log times within the range, inclusive. */
+export interface LogWindow {
+  readonly fromMs: number | null
+  readonly toMs: number | null
+  readonly match: 'within'
+  readonly inclusive: true
+}
+
+export type SpansResponse = Success<'spans', Page<SpanItem>> &
+  Context & { readonly window: SpanWindow | null }
 export type SpanResponse = Success<'span', SpanDetail> & Context
-export type LogsResponse = Success<'logs', Page<LogItem>> & Context
+export type LogsResponse = Success<'logs', Page<LogItem>> &
+  Context & { readonly window: LogWindow | null }
 
 export type QueryResponse =
   | SessionsResponse
@@ -577,22 +704,30 @@ export type QueryResponse =
 /** Microsecond resolution is plenty and keeps float noise out of the JSON. */
 const ms = (value: number): number => Math.round(value * 1000) / 1000
 
-const cut = (text: string, max: number) =>
-  text.length <= max ? { text, truncated: false } : { text: text.slice(0, max), truncated: true }
+/** Cuts to at most `max` UTF-16 units without splitting a surrogate pair. */
+function cut(text: string, max: number): { readonly text: string; readonly truncated: boolean } {
+  if (text.length <= max) return { text, truncated: false }
+  const code = text.charCodeAt(max - 1)
+  const end = code >= 0xd800 && code <= 0xdbff ? max - 1 : max
+  return { text: text.slice(0, end), truncated: true }
+}
 
 const bound = (input: Readonly<Record<string, Protocol.Json>>): BoundedAttributes => {
   const keys = Object.keys(input)
-  const values: Record<string, Protocol.Json> = {}
-  const truncatedKeys: Array<string> = []
-  for (const key of keys.slice(0, limits.attributeKeys)) {
-    const value = input[key]!
-    const encoded = JSON.stringify(value)
-    if (encoded.length > limits.valueChars) {
-      values[key] = encoded.slice(0, limits.valueChars)
-      truncatedKeys.push(key)
-    } else values[key] = value
+  return {
+    entries: keys.slice(0, limits.attributeKeys).map((key) => {
+      const name = cut(key, limits.keyChars)
+      const value = input[key]!
+      const encoded = cut(JSON.stringify(value), limits.valueChars)
+      return {
+        key: name.text,
+        keyTruncated: name.truncated,
+        value: encoded.truncated ? encoded.text : value,
+        valueTruncated: encoded.truncated,
+      }
+    }),
+    omittedKeys: Math.max(keys.length - limits.attributeKeys, 0),
   }
-  return { values, truncatedKeys, omittedKeys: Math.max(keys.length - limits.attributeKeys, 0) }
 }
 
 const statusOf = (span: TraceSpan): SpanStatus => {
@@ -610,14 +745,30 @@ const matchesStatus = (status: SpanStatus, filter: StatusFilter): boolean => {
   return status === filter
 }
 
+/** A session's program and runtime, cut to `nameChars`. */
+const describe = (session: Protocol.Session) => {
+  const program = cut(session.program, limits.nameChars)
+  const runtime = cut(session.runtime, limits.nameChars)
+  return {
+    program: program.text,
+    programTruncated: program.truncated,
+    pid: session.pid,
+    runtime: runtime.text,
+    runtimeTruncated: runtime.truncated,
+  }
+}
+
 /** A source reconstructed once, plus the evidence gaps the renderer ignores. */
 class Analysis {
   readonly store = new TraceStore()
+  /** Latest retained time (0 with none): open spans are measured up to here. */
   readonly now: number
   readonly observedFrom: number | undefined
+  readonly observedUntil: number | undefined
   readonly externalParents = new Map<string, Protocol.ExternalParent>()
   readonly logCounts = new Map<string, number>()
   readonly missingStarts: number
+  readonly outOfOrder: number
   readonly clientDropped: number
   private readonly items = new Map<string, SpanItem>()
 
@@ -629,7 +780,7 @@ class Analysis {
     store.epochOrigin = source.session.clock.wallClockEpochMillis
 
     const started = new Set<string>()
-    const missing = new Set<string>()
+    const early = new Set<string>()
     let clientDropped = 0
     for (const message of source.messages) {
       if (message._tag === 'SpanStart') {
@@ -641,28 +792,43 @@ class Analysis {
         (message._tag === 'SpanEnd' || message._tag === 'SpanEvent') &&
         !started.has(message.spanId)
       ) {
-        missing.add(message.spanId)
+        early.add(message.spanId)
       } else if (message._tag === 'Log') {
         const dropped = message.annotations['effect_inspect.dropped']
         if (typeof dropped === 'number') clientDropped += dropped
       }
     }
-    this.missingStarts = missing.size
+    let outOfOrder = 0
+    for (const id of early) if (started.has(id)) outOfOrder++
+    this.missingStarts = early.size - outOfOrder
+    this.outOfOrder = outOfOrder
     this.clientDropped = clientDropped
 
     store.applyAll(source.messages)
 
+    // Computed here rather than read from the store's `duration`, which is
+    // floored at 0 for the renderer; times before the clock anchor are real.
     let from = Number.POSITIVE_INFINITY
-    for (const span of store.spans.values()) from = Math.min(from, span.start)
+    let until = Number.NEGATIVE_INFINITY
+    const observe = (time: number) => {
+      if (time < from) from = time
+      if (time > until) until = time
+    }
+    for (const span of store.spans.values()) {
+      observe(span.start)
+      if (span.end !== undefined) observe(span.end)
+      for (const event of span.events) observe(event.time)
+    }
     for (const log of store.logs) {
-      from = Math.min(from, log.time)
+      observe(log.time)
       if (log.spanId !== undefined) {
         this.logCounts.set(log.spanId, (this.logCounts.get(log.spanId) ?? 0) + 1)
       }
     }
-    for (const sample of store.memory) from = Math.min(from, sample.time)
+    for (const sample of store.memory) observe(sample.time)
     this.observedFrom = from === Number.POSITIVE_INFINITY ? undefined : from
-    this.now = store.stats().duration
+    this.observedUntil = until === Number.NEGATIVE_INFINITY ? undefined : until
+    this.now = this.observedUntil ?? 0
   }
 
   item(span: TraceSpan): SpanItem {
@@ -682,10 +848,12 @@ class Analysis {
             return { kind: span.outcome.kind, message: text, messageTruncated: truncated }
           })()
         : null
+    const name = cut(span.name, limits.nameChars)
     const item: SpanItem = {
       spanId: span.spanId,
       traceId: span.traceId,
-      name: span.name,
+      name: name.text,
+      nameTruncated: name.truncated,
       kind: span.kind,
       parentSpanId: span.parentId ?? null,
       status,
@@ -694,7 +862,7 @@ class Analysis {
       durationMs: closed ? ms(total) : null,
       childCoveredMs: closed ? ms(total - self) : null,
       outsideChildrenMs: closed ? ms(self) : null,
-      elapsedLowerBoundMs: closed ? null : ms(Math.max(this.now - span.start, 0)),
+      elapsedLowerBoundMs: closed ? null : ms(this.now - span.start),
       childCount: span.children.length,
       openChildCount,
       eventCount: span.events.length,
@@ -714,10 +882,10 @@ class Analysis {
       clientDroppedMessages: this.clientDropped,
       fileTruncatedLines: source.truncatedLines,
       spansMissingStart: this.missingStarts,
+      spansOutOfOrder: this.outOfOrder,
       spansMissingParent: [...store.spans.values()].filter((span) => span.orphaned).length,
     }
     const lost = Object.values(counters).some((value) => value !== null && value > 0)
-    const empty = store.spans.size + store.logs.length + store.memory.length === 0
     let status: Completeness['status'] = 'noLossRecorded'
     if (lost) status = 'lossRecorded'
     else if (capture === undefined) status = 'unknown'
@@ -728,9 +896,7 @@ class Analysis {
         kind: source.kind,
         file: source.file ?? null,
         sessionId: session.sessionId,
-        program: session.program,
-        pid: session.pid,
-        runtime: session.runtime,
+        ...describe(session),
         active: session.active,
         startedAtEpochMillis: session.clock.wallClockEpochMillis,
         endedAtEpochMillis: session.endedAtEpochMillis ?? null,
@@ -740,7 +906,7 @@ class Analysis {
         unit: 'ms',
         reference: 'sessionStart',
         observedFromMs: this.observedFrom === undefined ? null : ms(this.observedFrom),
-        observedUntilMs: empty ? null : ms(this.now),
+        observedUntilMs: this.observedUntil === undefined ? null : ms(this.observedUntil),
       },
       completeness: {
         status,
@@ -792,10 +958,12 @@ const summarize = (analysis: Analysis, top: number): Summary => {
   const groups = new Map<string, { -readonly [K in keyof NameGroup]: NameGroup[K] }>()
   for (const item of items) {
     counts[item.status]++
-    let group = groups.get(item.name)
+    const fullName = analysis.store.spans.get(item.spanId)!.name
+    let group = groups.get(fullName)
     if (group === undefined) {
       group = {
         name: item.name,
+        nameTruncated: item.nameTruncated,
         count: 0,
         completed: 0,
         open: 0,
@@ -804,7 +972,7 @@ const summarize = (analysis: Analysis, top: number): Summary => {
         maxDurationMs: null,
         totalOutsideChildrenMs: 0,
       }
-      groups.set(item.name, group)
+      groups.set(fullName, group)
     }
     group.count++
     if (item.error !== null) group.failed++
@@ -853,7 +1021,11 @@ const summarize = (analysis: Analysis, top: number): Summary => {
           totalDurationMs: ms(group.totalDurationMs),
           totalOutsideChildrenMs: ms(group.totalOutsideChildrenMs),
         }))
-        .sort((a, b) => b.totalDurationMs - a.totalDurationMs || (a.name < b.name ? -1 : 1))
+        .sort(
+          (a, b) =>
+            b.totalDurationMs - a.totalDurationMs ||
+            (a.name < b.name ? -1 : Number(a.name > b.name)),
+        )
         .slice(0, top),
     },
   }
@@ -864,6 +1036,7 @@ const ref = (analysis: Analysis, span: TraceSpan): SpanRef => {
   return {
     spanId: item.spanId,
     name: item.name,
+    nameTruncated: item.nameTruncated,
     status: item.status,
     startMs: item.startMs,
     durationMs: item.durationMs,
@@ -918,11 +1091,15 @@ const detail = (
     children: { total: children.length, items: children.slice(0, childLimit) },
     events: {
       total: events.length,
-      items: events.slice(0, eventLimit).map((event) => ({
-        name: event.name,
-        timeMs: ms(event.time),
-        attributes: bound(event.attributes),
-      })),
+      items: events.slice(0, eventLimit).map((event) => {
+        const name = cut(event.name, limits.nameChars)
+        return {
+          name: name.text,
+          nameTruncated: name.truncated,
+          timeMs: ms(event.time),
+          attributes: bound(event.attributes),
+        }
+      }),
     },
   }
 }
@@ -947,7 +1124,7 @@ const spanNotFound = (op: string, spanId: string, analysis: Analysis): QueryFail
   failure(
     op,
     'SpanNotFound',
-    `Span ${spanId} is not in the retained data of session ${analysis.source.session.sessionId}.`,
+    'The requested span is not in the retained data of this session (see error.spanId).',
     'List span ids with the spans query. A span evicted by capacity or never received cannot be recovered; check completeness.',
     {
       spanId,
@@ -968,15 +1145,13 @@ export const listSessions = (
   source: SessionsResponse['source'],
   sessions: ReadonlyArray<Protocol.Session>,
   request: Extract<QueryRequest, { readonly op: 'sessions' }>,
-): SessionsResponse => {
+): SessionsResponse | QueryFailure => {
   const limit = request.limit ?? limits.sessions.default
   const offset = request.offset ?? 0
   const items = sessions
     .map((session) => ({
       sessionId: session.sessionId,
-      program: session.program,
-      pid: session.pid,
-      runtime: session.runtime,
+      ...describe(session),
       active: session.active,
       startedAtEpochMillis: session.clock.wallClockEpochMillis,
       endedAtEpochMillis: session.endedAtEpochMillis ?? null,
@@ -987,22 +1162,38 @@ export const listSessions = (
         b.startedAtEpochMillis - a.startedAtEpochMillis ||
         (a.sessionId < b.sessionId ? -1 : Number(a.sessionId > b.sessionId)),
     )
-  return {
+  return limitResponse({
     ok: true,
     apiVersion,
     op: 'sessions',
     query: { op: 'sessions', limit, offset },
     source,
     result: page(items, offset, limit),
-  }
+  } satisfies SessionsResponse)
 }
 
 /**
  * Answers a per-session query against one frozen source. The caller has
  * already matched `request.sessionId` to `source` exactly; this refuses a
- * session with a recorded ID conflict instead of answering for it.
+ * session with a recorded ID conflict instead of answering for it. The
+ * response is held to {@link limits.responseBytes}.
  */
-export const run = (source: TraceSource, request: SessionQuery): QueryResponse => {
+export const run = (source: TraceSource, request: SessionQuery): QueryResponse =>
+  limitResponse(answer(source, request))
+
+/**
+ * The applied request: `op` and the selected `sessionId` first, then the
+ * caller's filters and the filled-in defaults, in a fixed key order so the
+ * same query serializes identically live and from a file.
+ */
+const echo = (
+  request: SessionQuery,
+  sessionId: string,
+  applied: Record<string, unknown>,
+): Record<string, unknown> =>
+  Object.assign({ op: request.op, sessionId }, request, applied, { sessionId })
+
+const answer = (source: TraceSource, request: SessionQuery): QueryResponse => {
   const { op } = request
   const sessionId = source.session.sessionId
   const conflicts = source.session.conflicts ?? 0
@@ -1010,7 +1201,7 @@ export const run = (source: TraceSource, request: SessionQuery): QueryResponse =
     return failure(
       op,
       'SessionConflict',
-      `Session ID ${sessionId} was announced by ${conflicts} other run(s) besides the one recorded; the data cannot be attributed to your run.`,
+      `This session ID was announced by ${conflicts} other run(s) besides the one recorded; the data cannot be attributed to your run.`,
       'Relaunch with a new, unique EFFECT_INSPECT_SESSION_ID and query that ID.',
       { sessionId, conflicts },
     )
@@ -1042,7 +1233,8 @@ export const run = (source: TraceSource, request: SessionQuery): QueryResponse =
       for (const span of store.spans.values()) {
         const item = analysis.item(span)
         if (!matchesStatus(item.status, status)) continue
-        if (needle !== undefined && !item.name.toLowerCase().includes(needle)) continue
+        // Matches the full name, not the shortened one in the response.
+        if (needle !== undefined && !span.name.toLowerCase().includes(needle)) continue
         if (item.startMs > to || (item.endMs ?? analysis.now) < from) continue
         const measured = item.durationMs ?? item.elapsedLowerBoundMs!
         if (request.minDurationMs !== undefined && measured < request.minDurationMs) continue
@@ -1053,8 +1245,18 @@ export const run = (source: TraceSource, request: SessionQuery): QueryResponse =
         ok: true,
         apiVersion,
         op: 'spans',
-        query: { ...request, sessionId, status, sort, limit, offset },
+        query: echo(request, sessionId, { status, sort, limit, offset }),
         ...context,
+        window:
+          request.fromMs === undefined && request.toMs === undefined
+            ? null
+            : {
+                fromMs: request.fromMs ?? null,
+                toMs: request.toMs ?? null,
+                match: 'overlap',
+                inclusive: true,
+                timings: 'fullSpan',
+              },
         result: page(matched, offset, limit),
       }
     }
@@ -1101,13 +1303,16 @@ export const run = (source: TraceSource, request: SessionQuery): QueryResponse =
           typeof log.message === 'string' ? log.message : JSON.stringify(log.message),
           limits.logMessageChars,
         )
+        const spanName = log.spanId === undefined ? undefined : store.spans.get(log.spanId)?.name
+        const shortName = spanName === undefined ? undefined : cut(spanName, limits.nameChars)
         return {
           timeMs: ms(log.time),
           level: log.level,
           message: text,
           messageTruncated: truncated,
           spanId: log.spanId ?? null,
-          spanName: log.spanId === undefined ? null : (store.spans.get(log.spanId)?.name ?? null),
+          spanName: shortName?.text ?? null,
+          spanNameTruncated: shortName?.truncated ?? false,
           fiberId: log.fiberId ?? null,
           annotations: bound(log.annotations),
         }
@@ -1116,25 +1321,46 @@ export const run = (source: TraceSource, request: SessionQuery): QueryResponse =
         ok: true,
         apiVersion,
         op: 'logs',
-        query: { ...request, sessionId, ...(scope === undefined ? {} : { scope }), limit, offset },
+        query: echo(request, sessionId, {
+          ...(scope === undefined ? {} : { scope }),
+          limit,
+          offset,
+        }),
         ...context,
+        window:
+          request.fromMs === undefined && request.toMs === undefined
+            ? null
+            : {
+                fromMs: request.fromMs ?? null,
+                toMs: request.toMs ?? null,
+                match: 'within',
+                inclusive: true,
+              },
         result: { ...page(matched, offset, limit), items },
       }
     }
   }
 }
 
-const sessionNotFound = (op: string, requested: string, where: string): QueryFailure =>
+const sessionNotFound = (
+  op: string,
+  requested: string,
+  where: string,
+  details?: Record<string, unknown>,
+): QueryFailure =>
   failure(
     op,
     'SessionNotFound',
-    `No session with ID ${requested} ${where}. No other session was substituted.`,
+    `No session with the requested ID (error.sessionId) ${where}. No other session was substituted.`,
     'Check the exact ID the program was launched with (EFFECT_INSPECT_SESSION_ID or the sessionId option), that it uses Inspect.layer() against this collector, and that it has started; or list sessions.',
-    { sessionId: requested },
+    { ...details, sessionId: requested },
   )
 
 /** Answers a request against trace-file text: the offline equivalent of a collector query. */
-export const queryFile = (text: string, file: string, input: unknown): QueryResponse => {
+export const queryFile = (text: string, file: string, input: unknown): QueryResponse =>
+  limitResponse(answerFile(text, file, input))
+
+const answerFile = (text: string, file: string, input: unknown): QueryResponse => {
   const decoded = decodeRequest(input)
   if (Result.isFailure(decoded)) return decoded.failure
   const request = decoded.success
@@ -1151,7 +1377,10 @@ export const queryFile = (text: string, file: string, input: unknown): QueryResp
     request.sessionId !== saved &&
     `loaded:${request.sessionId}` !== saved
   ) {
-    return sessionNotFound(request.op, request.sessionId, `in ${file} (it holds ${saved})`)
+    return sessionNotFound(request.op, request.sessionId, 'is in this file', {
+      file,
+      fileSessionId: saved,
+    })
   }
   return run(source, request)
 }

@@ -300,19 +300,46 @@ describe('Query span detail and logs', () => {
     const leaf = response.result
     expect(leaf.ancestry).toEqual({
       items: [
-        { spanId: 'root', name: 'root', status: 'ok', startMs: 0, durationMs: 8 },
-        { spanId: 'mid', name: 'mid', status: 'ok', startMs: 1, durationMs: 6 },
+        {
+          spanId: 'root',
+          name: 'root',
+          nameTruncated: false,
+          status: 'ok',
+          startMs: 0,
+          durationMs: 8,
+        },
+        {
+          spanId: 'mid',
+          name: 'mid',
+          nameTruncated: false,
+          status: 'ok',
+          startMs: 1,
+          durationMs: 6,
+        },
       ],
       truncated: false,
     })
     expect(leaf.parent).toEqual({ kind: 'local', spanId: 'mid', retained: true })
     expect(leaf.attributes.omittedKeys).toBe(8)
-    expect(leaf.attributes.truncatedKeys).toEqual(['k0'])
-    expect(leaf.attributes.values.k0).toHaveLength(Query.limits.valueChars)
+    expect(leaf.attributes.entries).toHaveLength(Query.limits.attributeKeys)
+    const k0 = leaf.attributes.entries[0]
+    expect(k0).toMatchObject({ key: 'k0', keyTruncated: false, valueTruncated: true })
+    expect(k0?.value).toHaveLength(Query.limits.valueChars)
+    expect(leaf.attributes.entries[1]).toEqual({
+      key: 'k1',
+      keyTruncated: false,
+      value: 1,
+      valueTruncated: false,
+    })
     expect(leaf.events).toEqual({
       total: 1,
       items: [
-        { name: 'retry', timeMs: 3, attributes: { values: {}, truncatedKeys: [], omittedKeys: 0 } },
+        {
+          name: 'retry',
+          nameTruncated: false,
+          timeMs: 3,
+          attributes: { entries: [], omittedKeys: 0 },
+        },
       ],
     })
     expect(leaf.stackTruncated).toBe(true)
@@ -378,6 +405,7 @@ describe('Query completeness', () => {
       clientDroppedMessages: 0,
       fileTruncatedLines: 0,
       spansMissingStart: 0,
+      spansOutOfOrder: 0,
       spansMissingParent: 0,
       openSpans: 0,
       retainedMessages: 2,
@@ -460,6 +488,7 @@ describe('Query session selection', () => {
       ],
       { op: 'sessions' },
     )
+    if (!response.ok) throw new Error(response.error._tag)
     expect(response.result.items.map((item) => [item.sessionId, item.conflicts])).toEqual([
       ['new', 1],
       ['old', null],
@@ -574,5 +603,219 @@ describe('Query live/file equivalence', () => {
         traceFileHeaderCodec.decode(JSON.stringify({ ...old, laterField: { x: 1 } })),
       ),
     ).toBe(true)
+  })
+})
+
+describe('Query response bounds', () => {
+  const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length
+  const huge = 'n'.repeat(100_000)
+  const wide = '界'.repeat(100_000)
+  const emoji = `a${'😀'.repeat(50_000)}`
+
+  const hugeSource = live(
+    [
+      ...Array.from({ length: 200 }, (_, i) => {
+        const base = start(`s-${i}`, i) as Extract<Protocol.ClientMessage, { _tag: 'SpanStart' }>
+        return {
+          ...base,
+          name: [huge, wide, emoji][i % 3]! + i,
+          attributes: { [`${huge}${i}`]: wide, [`${wide}${i}`]: 1 },
+        }
+      }),
+      ...Array.from({ length: 200 }, (_, i) =>
+        end(`s-${i}`, i + 1, i % 2 === 0 ? fail('Fail', wide) : undefined),
+      ),
+      {
+        _tag: 'SpanEvent',
+        sessionId: sid,
+        spanId: 's-0',
+        name: wide,
+        time: at(0.5),
+        attributes: { [huge]: huge },
+      },
+      log(0.5, wide, 's-1', 'Info', { [huge]: wide }),
+    ],
+    { program: wide, runtime: huge },
+  )
+
+  it('keeps huge and non-ASCII names, keys and values under the byte bound', () => {
+    for (const request of [
+      { op: 'spans', limit: Query.limits.spans.max },
+      { op: 'summary', top: Query.limits.top.max },
+      { op: 'span', spanId: 's-0' },
+      { op: 'logs', limit: Query.limits.logs.max },
+    ]) {
+      const response = ok(hugeSource, request)
+      expect(bytes(response)).toBeLessThanOrEqual(Query.limits.responseBytes)
+    }
+    const spans = ok(hugeSource, { op: 'spans', limit: 3 })
+    if (spans.op !== 'spans') throw new Error('expected spans')
+    for (const item of spans.result.items) {
+      expect(item.nameTruncated).toBe(true)
+      expect(item.name.length).toBeLessThanOrEqual(Query.limits.nameChars)
+      expect(item.name.isWellFormed()).toBe(true)
+    }
+    // The surrogate pair straddling the cut is dropped, not split.
+    expect(spans.result.items[2]?.name).toHaveLength(Query.limits.nameChars - 1)
+    // Identities stay exact and usable.
+    expect(spans.result.items.map((item) => item.spanId)).toEqual(['s-0', 's-1', 's-2'])
+    expect(spans.source).toMatchObject({ programTruncated: true, runtimeTruncated: true })
+
+    const span = ok(hugeSource, { op: 'span', spanId: 's-0' })
+    if (span.op !== 'span') throw new Error('expected span')
+    expect(span.result.attributes.entries.map((entry) => entry.key.length)).toEqual([
+      Query.limits.keyChars,
+      Query.limits.keyChars,
+    ])
+    expect(span.result.attributes.entries.every((entry) => entry.keyTruncated)).toBe(true)
+    expect(span.result.events.items[0]).toMatchObject({ nameTruncated: true })
+    expect(span.result.error?.messageTruncated).toBe(true)
+
+    const logs = ok(hugeSource, { op: 'logs', spanId: 's-1', scope: 'span' })
+    if (logs.op !== 'logs') throw new Error('expected logs')
+    expect(logs.result.items[0]).toMatchObject({ spanNameTruncated: true, messageTruncated: true })
+    expect(logs.result.items[0]?.annotations.entries[0]).toMatchObject({
+      keyTruncated: true,
+      valueTruncated: true,
+    })
+
+    const summary = ok(hugeSource, { op: 'summary', top: 50 })
+    if (summary.op !== 'summary') throw new Error('expected summary')
+    expect(summary.result.names.total).toBe(200)
+    expect(summary.result.names.items.every((group) => group.nameTruncated)).toBe(true)
+  })
+
+  it('refuses a response that only exact identifiers make too large, with a small error', () => {
+    const longId = (i: number) => `${'i'.repeat(50_000)}-${i}`
+    const source = live(
+      Array.from({ length: 50 }, (_, i) => [start(longId(i), i), end(longId(i), i + 1)]).flat(),
+    )
+    const response = Query.run(source, { op: 'spans', limit: 50 })
+    expect(response.ok ? 'ok' : response.error).toMatchObject({
+      _tag: 'ResponseTooLarge',
+      limitBytes: Query.limits.responseBytes,
+      originalOutcome: 'ok',
+    })
+    expect(bytes(response)).toBeLessThan(2_000)
+    // The same page, smaller, still returns the IDs verbatim.
+    const small = ok(source, { op: 'spans', limit: 2 })
+    expect(small.op === 'spans' && small.result.items[0]?.spanId).toBe(longId(0))
+  })
+
+  it('bounds echoes of untrusted request text and error details', () => {
+    const tagAndSize = (response: Query.QueryResponse) => [
+      response.ok ? 'ok' : response.error._tag,
+      bytes(response) < 4_000,
+    ]
+    const text = Query.toTraceFile(live([start('a', 0), end('a', 1)]))
+    const huge = 'x'.repeat(2_000_000)
+    expect(tagAndSize(Query.queryFile(text, 'f', { op: huge }))).toEqual(['InvalidRequest', true])
+    expect(Query.queryFile(text, 'f', { op: huge }).op).toBeNull()
+    expect(tagAndSize(Query.queryFile(text, 'f', { op: 'spans', status: huge }))).toEqual([
+      'InvalidRequest',
+      true,
+    ])
+    expect(tagAndSize(Query.queryFile(text, 'f', { op: 'summary', sessionId: huge }))).toEqual([
+      'InvalidRequest',
+      true,
+    ])
+    expect(tagAndSize(Query.queryFile(text, 'f', { op: 'spans', name: huge }))).toEqual([
+      'InvalidRequest',
+      true,
+    ])
+    // A long but acceptable ID is echoed exactly in a SessionNotFound.
+    const longest = 'y'.repeat(Query.limits.requestTextChars)
+    const missing = Query.queryFile(text, 'f', { op: 'summary', sessionId: longest })
+    expect(missing.ok ? undefined : missing.error.sessionId).toBe(longest)
+    // A huge file label cannot inflate a failure past the bound either.
+    const bad = Query.queryFile('not a trace', huge, { op: 'summary' })
+    expect(tagAndSize(bad)).toEqual(['ResponseTooLarge', true])
+    expect(bad.ok ? undefined : bad.error.originalOutcome).toBe('TraceFileError')
+  })
+})
+
+describe('Query corrections', () => {
+  it('measures observed time and open spans before the clock anchor', () => {
+    const source = live([start('early', -10), end('early', -5), start('open', -8)])
+    const spans = ok(source, { op: 'spans' })
+    expect(spans.time).toMatchObject({ observedFromMs: -10, observedUntilMs: -5 })
+    const open =
+      spans.op === 'spans' ? spans.result.items.find((i) => i.spanId === 'open') : undefined
+    expect(open?.elapsedLowerBoundMs).toBe(3)
+    const empty = ok(live([]), { op: 'summary' })
+    expect(empty.time).toMatchObject({ observedFromMs: null, observedUntilMs: null })
+  })
+
+  it('states how a time window was applied', () => {
+    const source = live([start('long', 0), end('long', 100), start('late', 200), end('late', 210)])
+    const windowed = ok(source, { op: 'spans', fromMs: 50, toMs: 60 })
+    if (windowed.op !== 'spans') throw new Error('expected spans')
+    expect(windowed.window).toEqual({
+      fromMs: 50,
+      toMs: 60,
+      match: 'overlap',
+      inclusive: true,
+      timings: 'fullSpan',
+    })
+    // Selected by overlap; its duration is the whole span, not the 10ms in the window.
+    expect(windowed.result.items.map((item) => [item.spanId, item.durationMs])).toEqual([
+      ['long', 100],
+    ])
+    const edge = ok(source, { op: 'spans', fromMs: 100 })
+    expect(edge.op === 'spans' && edge.result.items.map((item) => item.spanId)).toEqual([
+      'long',
+      'late',
+    ])
+    const plain = ok(source, { op: 'spans' })
+    expect(plain.op === 'spans' && plain.window).toBeNull()
+    const logs = ok(live([log(1, 'a'), log(2, 'b')]), { op: 'logs', toMs: 1 })
+    expect(logs.op === 'logs' && logs.window).toEqual({
+      fromMs: null,
+      toMs: 1,
+      match: 'within',
+      inclusive: true,
+    })
+  })
+
+  it('rejects a logs scope without a spanId instead of ignoring it', () => {
+    const decoded = Query.decodeRequest({ op: 'logs', scope: 'span' })
+    expect(Result.isFailure(decoded) && decoded.failure.error._tag).toBe('InvalidRequest')
+    expect(Result.isFailure(decoded) && decoded.failure.error.hint).toContain('spanId')
+    const all = ok(live([log(1, 'a', 'x'), log(2, 'b')]), { op: 'logs' })
+    expect(all.op === 'logs' && all.result.total).toBe(2)
+    expect(all.query).not.toHaveProperty('scope')
+  })
+
+  it('separates an end that arrived before its start from a missing start', () => {
+    const response = ok(live([end('late-start', 5), start('late-start', 1), end('gone', 3)]), {
+      op: 'summary',
+    })
+    expect(response.completeness).toMatchObject({
+      status: 'lossRecorded',
+      spansMissingStart: 1,
+      spansOutOfOrder: 1,
+    })
+  })
+})
+
+describe('Query serialization', () => {
+  it('serializes a live query and its file query byte-identically, source aside', () => {
+    const source = live([start('a', 0), end('a', 1), log(0.5, 'x', 'a')])
+    const text = Query.toTraceFile(source)
+    for (const request of [
+      { op: 'spans', sort: 'outsideChildren', fromMs: 0 },
+      { op: 'logs', spanId: 'a', minLevel: 'Info' },
+    ]) {
+      const strip = (response: Query.QueryResponse) =>
+        JSON.stringify(
+          'source' in response
+            ? { ...response, source: { ...response.source, kind: 0, file: 0 } }
+            : response,
+        )
+      // The collector decodes too, which fixes key order to the schema's.
+      const decoded = Result.getOrThrow(Query.decodeRequest({ ...request, sessionId: sid }))
+      const fromLive = Query.run(source, decoded as Query.SessionQuery)
+      expect(strip(Query.queryFile(text, 'f', request))).toBe(strip(fromLive))
+    }
   })
 })

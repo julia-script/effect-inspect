@@ -202,6 +202,41 @@ describe('collector query API', () => {
       }),
     ))
 
+  it('bounds live responses and rejects a logs scope without a span', () =>
+    runTest(
+      Effect.gen(function* () {
+        const { port, url } = yield* startCollector()
+        const huge = '界'.repeat(100_000)
+        yield* instrumented(
+          port,
+          'huge-names',
+          Effect.forEach(
+            Array.from({ length: 60 }, (_, i) => i),
+            (i) =>
+              Effect.logInfo('in a huge span').pipe(
+                Effect.withSpan(`${huge}${i}`, { attributes: { [huge]: huge } }),
+              ),
+          ),
+        )
+        yield* until(url, { op: 'summary', sessionId: 'huge-names' }, ended)
+        const size = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).length
+        for (const request of [
+          { op: 'spans', limit: 200 },
+          { op: 'summary', top: 50 },
+          { op: 'logs', limit: 500 },
+        ]) {
+          const response = yield* query(url, { ...request, sessionId: 'huge-names' })
+          expect(response.ok).toBe(true)
+          expect(size(response)).toBeLessThanOrEqual(Query.limits.responseBytes)
+        }
+        const scoped = yield* query(url, { op: 'logs', sessionId: 'huge-names', scope: 'span' })
+        expect(scoped.ok ? 'ok' : scoped.error._tag).toBe('InvalidRequest')
+        const junk = yield* query(url, { op: 'x'.repeat(2_000_000) })
+        expect(junk.ok ? 'ok' : junk.error._tag).toBe('InvalidRequest')
+        expect(size(junk)).toBeLessThan(4_000)
+      }),
+    ))
+
   it('distinguishes an absent collector from a service that is not one', () =>
     runTest(
       Effect.gen(function* () {

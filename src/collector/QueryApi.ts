@@ -4,11 +4,14 @@
  * - `POST /api/v1/query` — body: a `Query.QueryRequest` JSON object. Reply:
  *   a `Query.QueryResponse` JSON object. The body is authoritative; the
  *   status mirrors it (200 ok, 400 InvalidRequest, 404 SessionNotFound or
- *   SpanNotFound, 409 SessionConflict).
+ *   SpanNotFound, 409 SessionConflict, 413 ResponseTooLarge). Every JSON
+ *   reply, errors included, is held to `Query.limits.responseBytes`.
  * - `GET /api/v1/export?sessionId=ID` — the session's frozen snapshot as
  *   `.eitrace` text with its loss counters in the header (200), or a
  *   `QueryFailure` JSON body (400/404). A conflicted session still exports,
  *   so the evidence is kept; queries against the file refuse it the same way.
+ *   Export is a lossless artifact transfer, so it is not held to the JSON
+ *   response bound: its size is the retained session (up to capacity).
  *
  * Each request answers from one atomic snapshot of one session. Two requests
  * against an active session see different snapshots; compare
@@ -32,13 +35,18 @@ const statusOf = (response: Query.QueryResponse): number => {
       return 404
     case 'SessionConflict':
       return 409
+    case 'ResponseTooLarge':
+      return 413
     default:
       return 500
   }
 }
 
-const reply = (response: Query.QueryResponse) =>
-  HttpServerResponse.jsonUnsafe(response, { status: statusOf(response) })
+/** Every JSON reply goes through the response byte bound, errors included. */
+const reply = (unbounded: Query.QueryResponse) => {
+  const response = Query.limitResponse(unbounded)
+  return HttpServerResponse.jsonUnsafe(response, { status: statusOf(response) })
+}
 
 /** Answers one decoded request from the store. */
 export const answer = (input: unknown): Effect.Effect<Query.QueryResponse, never, Store> =>
@@ -53,7 +61,8 @@ export const answer = (input: unknown): Effect.Effect<Query.QueryResponse, never
     if (request.sessionId === undefined) return Query.sessionRequired(request.op)
     const snapshot = yield* store.snapshot(request.sessionId)
     if (snapshot === undefined) return Query.liveSessionNotFound(request.op, request.sessionId)
-    // ponytail: rebuilds the trace model per request (~O(retained messages)).
+    // ponytail: rebuilds the trace model per request (~O(retained messages)),
+    // synchronously, which can delay ingest on this event loop meanwhile.
     // Cache by `messagesObserved` if repeated queries on huge sessions show up.
     return Query.run(Query.fromSnapshot(snapshot, yield* Clock.currentTimeMillis), request)
   })
