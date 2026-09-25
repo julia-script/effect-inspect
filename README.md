@@ -85,7 +85,13 @@ The `sessionId` option wins over the variable; with neither, a random UUID is
 used only when the variable is absent. IDs are 1–128 ASCII letters, digits,
 `.`, `_` or `-`, starting with a letter or digit. An invalid ID — including a
 variable that is set but empty — is not replaced with another one: the program
-runs normally, records nothing, and logs a warning saying why. Setting the variable does not instrument a program by
+runs normally, records nothing, and logs a warning saying why. The same
+happens when the runtime has an environment it may not read: under Deno
+without env permission the layer checks the permission first (it never asks
+for it, so the program is not stopped at a prompt) and disables recording.
+Pass the `sessionId` option, or grant access with
+`--allow-env=EFFECT_INSPECT_SESSION_ID`, to record there. A runtime with no
+environment at all, such as a browser, just uses a random UUID. Setting the variable does not instrument a program by
 itself; it still needs `Inspect.layer()`.
 
 **Use one ID per run.** The ID is kept across reconnects, but a _different_

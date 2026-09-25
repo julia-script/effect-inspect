@@ -412,12 +412,116 @@ describe('Inspect.layer session ID', () => {
 
   it('resolves injected env records exactly as it resolves process.env', () => {
     for (const [, caseEnv, expected] of matrix) {
-      const resolved = Client.resolveSessionId(undefined, caseEnv)
+      const resolved = Client.resolveSessionId(undefined, () => caseEnv)
       if (expected === 'disabled') expect(Result.isFailure(resolved)).toBe(true)
       else expect(Result.getOrThrow(resolved)).toMatch(expected === 'uuid' ? uuid : expected)
     }
     // No environment at all, as in a runtime without `process`, is absence.
-    expect(Result.getOrThrow(Client.resolveSessionId(undefined, undefined))).toMatch(uuid)
+    expect(Result.getOrThrow(Client.resolveSessionId(undefined, () => undefined))).toMatch(uuid)
+  })
+
+  it('reports an unreadable environment instead of throwing or treating it as absent', () => {
+    const denied = new Error('NotCapable: Requires env access')
+    const unreadable = [
+      () => {
+        throw denied
+      },
+      () =>
+        new Proxy<Record<string, string>>(
+          {},
+          {
+            get: () => {
+              throw denied
+            },
+          },
+        ),
+    ]
+    for (const env of unreadable) {
+      const resolved = Client.resolveSessionId(undefined, env)
+      expect(Result.isFailure(resolved)).toBe(true)
+      expect(Result.isFailure(resolved) ? resolved.failure : '').toContain('could not be read')
+      // An explicit option never touches the environment at all.
+      expect(Result.getOrThrow(Client.resolveSessionId({ sessionId: 'opt-1' }, env))).toBe('opt-1')
+    }
+  })
+
+  /** Runs `f` with the `process` / `Deno` globals replaced, restoring them after. */
+  const withGlobals = async <A>(
+    globals: { readonly process?: unknown; readonly Deno?: unknown },
+    f: () => Promise<A>,
+  ): Promise<A> => {
+    const saved = Object.keys(globals).map(
+      (key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)] as const,
+    )
+    for (const [key, value] of Object.entries(globals)) {
+      Object.defineProperty(globalThis, key, { value, configurable: true, writable: true })
+    }
+    try {
+      return await f()
+    } finally {
+      for (const [key, descriptor] of saved) {
+        if (descriptor === undefined) Reflect.deleteProperty(globalThis, key)
+        else Object.defineProperty(globalThis, key, descriptor)
+      }
+    }
+  }
+
+  it('keeps the host exit when reading the environment throws', async () => {
+    const hostile = {
+      get env(): never {
+        throw new Error('NotCapable: Requires env access')
+      },
+    }
+    const { value, messages, logs } = await withGlobals({ process: hostile }, () =>
+      withCollector(Effect.succeed('host-ok').pipe(Effect.withSpan('work'))),
+    )
+    expect(value).toBe('host-ok')
+    expect(messages).toStrictEqual([])
+    expect(logs.some((log) => log.includes('could not be read'))).toBe(true)
+  })
+
+  it('asks Deno for env permission without requesting it, and reads only when granted', async () => {
+    for (const [state, env, expected] of [
+      ['prompt', {}, 'disabled'],
+      ['denied', {}, 'disabled'],
+      ['granted', {}, 'uuid'],
+      ['granted', { EFFECT_INSPECT_SESSION_ID: 'deno-1' }, 'deno-1'],
+    ] as const) {
+      const queried: Array<unknown> = []
+      let envRead = false
+      const deno = {
+        permissions: {
+          querySync: (descriptor: unknown) => {
+            queried.push(descriptor)
+            return { state }
+          },
+          // Requesting is what prompts; it must never happen.
+          requestSync: () => {
+            throw new Error('requested a permission')
+          },
+        },
+      }
+      const process = {
+        get env() {
+          envRead = true
+          return env
+        },
+      }
+      const { value, messages, logs } = await withGlobals({ process, Deno: deno }, () =>
+        withCollector(Effect.succeed('host-ok').pipe(Effect.withSpan('work'))),
+      )
+      expect(value).toBe('host-ok')
+      expect(queried).toStrictEqual([{ name: 'env', variable: 'EFFECT_INSPECT_SESSION_ID' }])
+      expect(envRead).toBe(state === 'granted')
+      const sent = hellos(messages).map((hello) => hello.sessionId)
+      if (expected === 'disabled') {
+        expect(messages).toStrictEqual([])
+        expect(logs.some((log) => log.includes(`env access is ${state}`))).toBe(true)
+      } else {
+        expect(sent).toHaveLength(1)
+        expect(sent[0]).toMatch(expected === 'uuid' ? uuid : expected)
+      }
+    }
   })
 
   it('lets the option win over a set-but-empty variable', async () => {
