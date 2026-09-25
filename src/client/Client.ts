@@ -24,19 +24,7 @@
  * socket slow enough for a realistic burst to overrun the queue in the first
  * place.
  */
-import {
-  Config,
-  ConfigProvider,
-  Context,
-  Duration,
-  Effect,
-  Latch,
-  Option,
-  Queue,
-  Result,
-  Schedule,
-  type Scope,
-} from 'effect'
+import { Context, Duration, Effect, Latch, Queue, Result, Schedule, type Scope } from 'effect'
 import type { Socket } from 'effect/unstable/socket'
 import { Socket as SocketService } from 'effect/unstable/socket'
 import { clientCodec } from '../protocol/Codec.ts'
@@ -187,62 +175,42 @@ const memoryUsage = (): (() => NodeJS.MemoryUsage) | undefined => {
 }
 
 /**
- * Whether the provider knows `EFFECT_INSPECT_SESSION_ID` but has no value for it.
+ * Picks this client's session ID: the `sessionId` option, else the exact
+ * `EFFECT_INSPECT_SESSION_ID` key of `env`, else a random UUID.
  *
- * The environment provider reports an empty variable as missing, so this asks
- * about its name instead: the parent path lists `ID` as a child, yet the leaf
- * itself has no node. Keyed by the env provider's `_`-split path, so any other
- * provider simply answers "no", and the variable is then treated as absent.
- */
-const isSetButEmpty = Effect.gen(function* () {
-  const provider = yield* ConfigProvider.ConfigProvider
-  const parent = yield* provider.load(['EFFECT', 'INSPECT', 'SESSION'])
-  const leaf = yield* provider.load(['EFFECT', 'INSPECT', 'SESSION', 'ID'])
-  return parent?._tag === 'Record' && parent.keys.has('ID') && leaf === undefined
-}).pipe(Effect.mapError((error) => `${sessionIdEnv} could not be read: ${error.message}`))
-
-/**
- * Picks this client's session ID: the `sessionId` option, else
- * `EFFECT_INSPECT_SESSION_ID`, else a random UUID.
+ * `env` defaults to the raw `process.env`, read directly rather than through
+ * Effect's `ConfigProvider`: the env provider reports an empty value as
+ * missing, and this setting has to tell a set-but-empty variable
+ * (`ID=$UNSET_VAR`, a launcher mistake) from an absent one. So only the exact
+ * key counts — similarly prefixed variables are irrelevant — and only its
+ * absence falls back to a UUID. A runtime without `process` has no
+ * environment, which is absence.
  *
- * Read through Effect's `ConfigProvider`, which defaults to the process
- * environment and is simply empty in a runtime without one. Only an absent
- * variable falls back to a UUID: a set-but-empty one (`ID=$UNSET_VAR`) is a
- * launcher mistake, so it is invalid like any other bad value. Fails with a
- * diagnostic, rather than falling back to another ID, when the chosen value is
- * invalid or the environment cannot be read — a silently substituted ID is a
- * run nobody can find.
+ * Fails with a diagnostic, rather than falling back to another ID, when the
+ * chosen value is empty or otherwise invalid — a silently substituted ID is a
+ * run nobody can find. Exported for tests only; not part of the public API.
  */
-const resolveSessionId = (
+export const resolveSessionId = (
   options: Options | undefined,
-): Effect.Effect<Protocol.SessionId, string> =>
-  Effect.gen(function* () {
-    const fromOption = options?.sessionId
-    const [source, chosen] =
-      fromOption === undefined
-        ? [
-            sessionIdEnv,
-            yield* Config.option(Config.String(sessionIdEnv)).pipe(
-              Effect.mapError((error) => `${sessionIdEnv} could not be read: ${error.message}`),
-            ),
-          ]
-        : ['the sessionId option', Option.some(fromOption)]
-    if (Option.isNone(chosen) && (yield* isSetButEmpty)) {
-      return yield* Effect.fail(`${sessionIdEnv} is set but empty: unset it or choose an ID`)
-    }
-    if (Option.isNone(chosen)) {
-      // Effect's `Crypto` can fail with a PlatformError and nothing on this path
-      // is allowed to fail; a session id needs uniqueness, not strength.
-      // oxlint-disable-next-line effecttsgo/crypto-random-uuid-in-effect
-      return crypto.randomUUID()
-    }
-    if (!Protocol.isValidSessionId(chosen.value)) {
-      return yield* Effect.fail(
-        `${source} is not a valid session ID "${chosen.value}": use ${Protocol.sessionIdRule}`,
-      )
-    }
-    return chosen.value
-  })
+  env: Readonly<Record<string, string | undefined>> | undefined = globalThis.process?.env,
+): Result.Result<Protocol.SessionId, string> => {
+  const fromOption = options?.sessionId
+  const source = fromOption === undefined ? sessionIdEnv : 'the sessionId option'
+  const chosen = fromOption ?? env?.[sessionIdEnv]
+  if (chosen === undefined) {
+    // Effect's `Crypto` can fail with a PlatformError and nothing on this path
+    // is allowed to fail; a session id needs uniqueness, not strength.
+    // oxlint-disable-next-line effecttsgo/crypto-random-uuid
+    return Result.succeed(crypto.randomUUID())
+  }
+  if (chosen === '') return Result.fail(`${source} is set but empty: unset it or choose an ID`)
+  if (!Protocol.isValidSessionId(chosen)) {
+    return Result.fail(
+      `${source} is not a valid session ID "${chosen}": use ${Protocol.sessionIdRule}`,
+    )
+  }
+  return Result.succeed(chosen)
+}
 
 /**
  * Forks the fiber that samples process memory into the outbound queue.
@@ -303,7 +271,7 @@ export const make = (
   options?: Options,
 ): Effect.Effect<InspectClient['Service'], never, Scope.Scope | Socket.Socket> =>
   Effect.gen(function* () {
-    const resolved = yield* Effect.result(resolveSessionId(options))
+    const resolved = resolveSessionId(options)
     if (Result.isFailure(resolved)) {
       yield* Effect.logWarning(`effect-inspect disabled: ${resolved.failure}`)
       return InspectClient.of({ sessionId: '', sendUnsafe: () => {} })

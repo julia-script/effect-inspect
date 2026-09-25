@@ -8,9 +8,10 @@
 // oxlint-disable effecttsgo/lazy-promise-in-effect-sync
 // oxlint-disable typescript/no-floating-promises
 import { describe, expect, it } from 'bun:test'
-import { ConfigProvider, Effect, Exit, Layer, Logger, Result } from 'effect'
+import { Effect, Exit, Layer, Logger, Result } from 'effect'
 import { clientCodec } from '../protocol/Codec.ts'
 import { isValidSessionId, type ClientMessage, type Hello } from '../protocol/Schema.ts'
+import * as Client from './Client.ts'
 import * as Inspect from './Inspect.ts'
 
 /**
@@ -20,10 +21,15 @@ import * as Inspect from './Inspect.ts'
  * The server is real rather than a stubbed `Socket`, because most of what this
  * layer promises is about a socket's failure modes.
  *
- * The environment is `env` (empty by default) rather than the real one, so an
- * `EFFECT_INSPECT_SESSION_ID` in the shell running the tests cannot leak in.
- * Logs are captured in place of the console.
+ * `env` is written into the real `process.env` for the run — so the layer's
+ * default environment path is what gets tested — with
+ * `EFFECT_INSPECT_SESSION_ID` cleared first so the shell running the tests
+ * cannot leak in; every touched key is restored afterwards. Logs are captured
+ * in place of the console.
  */
+/** Captured at load, so a test that hides the `process` global can still restore it. */
+const realEnv = process.env
+
 const withCollector = async <A>(
   program: Effect.Effect<A, never, never>,
   options?: Inspect.Options & { readonly env?: Record<string, string> },
@@ -35,6 +41,10 @@ const withCollector = async <A>(
   const { env, ...layerOptions } = options ?? {}
   const logs: Array<string> = []
   const lines: Array<string> = []
+  const touched = [Client.sessionIdEnv, ...Object.keys(env ?? {})]
+  const saved = touched.map((key) => [key, realEnv[key]] as const)
+  for (const key of touched) delete realEnv[key]
+  Object.assign(realEnv, env)
   let received: (() => void) | undefined
   const server = Bun.serve({
     port: 0,
@@ -62,10 +72,6 @@ const withCollector = async <A>(
             ]),
           ),
         ),
-        Effect.provideService(
-          ConfigProvider.ConfigProvider,
-          ConfigProvider.fromEnv({ env: env ?? {} }),
-        ),
       ),
     )
     // The layer's scope closes with the program, but delivery is asynchronous:
@@ -80,6 +86,10 @@ const withCollector = async <A>(
     return { value, messages, logs }
   } finally {
     server.stop(true)
+    for (const [key, value] of saved) {
+      if (value === undefined) delete realEnv[key]
+      else realEnv[key] = value
+    }
   }
 }
 
@@ -366,25 +376,48 @@ describe('Inspect.layer session ID', () => {
     expect(hellos(messages).map((hello) => hello.sessionId)).toStrictEqual(['from-env-1'])
   })
 
-  it('generates a UUID only when the variable is absent', async () => {
-    // Neighbouring variables share the `EFFECT_INSPECT_` prefix in the env
-    // provider's path tree; they must not read as a set-but-empty ID.
-    for (const absent of [{}, { EFFECT_INSPECT_PORT: '1', EFFECT_INSPECT_SESSION: 'x' }]) {
-      const { messages } = await withCollector(traced, { env: absent })
-      expect(hellos(messages)[0]?.sessionId).toMatch(uuid)
-    }
-  })
+  // The verifier's matrix: an exact key that is present but empty disables
+  // recording whatever its `_`-prefixed neighbours are; only its absence
+  // yields a UUID. `G` is `A` again, named separately in the report as the
+  // real `process.env` case — every case here goes through `process.env`.
+  const ID = 'EFFECT_INSPECT_SESSION_ID'
+  const matrix: ReadonlyArray<readonly [string, Record<string, string>, string]> = [
+    ['A', { [ID]: '', [`${ID}_X`]: 'foo' }, 'disabled'],
+    ['B', { [`${ID}_X`]: 'foo' }, 'uuid'],
+    ['C', { [ID]: 'abc', [`${ID}_X`]: 'foo' }, 'abc'],
+    ['D', { [ID]: '' }, 'disabled'],
+    ['E', { [ID]: '', [`${ID}_X`]: '' }, 'disabled'],
+    ['F', { [`${ID}_X`]: '' }, 'uuid'],
+    ['G', { [ID]: '', [`${ID}_X`]: 'foo', EFFECT_INSPECT_PORT: '1' }, 'disabled'],
+  ]
 
-  it('records nothing and warns when the variable is set but empty', async () => {
-    const { value, messages, logs } = await withCollector(
-      Effect.succeed('ok').pipe(Effect.withSpan('work')),
-      { env: { EFFECT_INSPECT_SESSION_ID: '' } },
-    )
-    expect(value).toBe('ok')
-    expect(messages).toStrictEqual([])
-    expect(logs.some((log) => log.includes('EFFECT_INSPECT_SESSION_ID is set but empty'))).toBe(
-      true,
-    )
+  for (const [label, caseEnv, expected] of matrix) {
+    it(`case ${label}: ${JSON.stringify(caseEnv)} -> ${expected}`, async () => {
+      const { value, messages, logs } = await withCollector(
+        Effect.succeed('ok').pipe(Effect.withSpan('work')),
+        { env: caseEnv },
+      )
+      expect(value).toBe('ok')
+      const sent = hellos(messages).map((hello) => hello.sessionId)
+      if (expected === 'disabled') {
+        expect(messages).toStrictEqual([])
+        expect(logs.some((log) => log.includes(`${ID} is set but empty`))).toBe(true)
+      } else {
+        expect(sent).toHaveLength(1)
+        expect(sent[0]).toMatch(expected === 'uuid' ? uuid : new RegExp(`^${expected}$`))
+        expect(logs.some((log) => log.includes('effect-inspect disabled'))).toBe(false)
+      }
+    })
+  }
+
+  it('resolves injected env records exactly as it resolves process.env', () => {
+    for (const [, caseEnv, expected] of matrix) {
+      const resolved = Client.resolveSessionId(undefined, caseEnv)
+      if (expected === 'disabled') expect(Result.isFailure(resolved)).toBe(true)
+      else expect(Result.getOrThrow(resolved)).toMatch(expected === 'uuid' ? uuid : expected)
+    }
+    // No environment at all, as in a runtime without `process`, is absence.
+    expect(Result.getOrThrow(Client.resolveSessionId(undefined, undefined))).toMatch(uuid)
   })
 
   it('lets the option win over a set-but-empty variable', async () => {
