@@ -116,7 +116,9 @@ SOURCES (every per-session query needs exactly one)
 OUTPUT AND EXIT CODES (all query commands)
   stdout: one JSON document, pretty-printed; --json prints it compact on one line.
     Success {"ok":true,"apiVersion":1,"op",...,"result"}; failure {"ok":false,
-    "apiVersion":1,"op","error":{"_tag","message","hint",...}}. At most 1048576 bytes.
+    "apiVersion":1,"op","error":{"_tag","message","hint",...}}. The whole stdout,
+    newline included, is at most 1048576 bytes in either mode; pretty output is
+    larger, so a page that only fits compact gives ResponseTooLarge: add --json.
   stderr: empty on success; a one-line diagnostic and a hint on failure.
   0 ok (empty results too: result.total 0)   1 internal error
   2 InvalidRequest          3 SessionNotFound         4 SpanNotFound

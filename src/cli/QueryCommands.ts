@@ -66,13 +66,46 @@ const write = (text: string, to: 'stdout' | 'stderr') =>
     yield* Stream.run(Stream.make(text), to === 'stdout' ? stdio.stdout() : stdio.stderr())
   }).pipe(Effect.ignore)
 
+const encoder = new TextEncoder()
+
 /** Pretty JSON by default; one compact line with `--json`. */
 const render = (response: Response, json: boolean) =>
   `${JSON.stringify(response, null, json ? undefined : 2)}\n`
 
+/**
+ * The exact stdout text for `response`, held to `Query.limits.responseBytes`
+ * as emitted: after formatting, trailing newline included. The query layer
+ * bounds compact JSON only, so indentation (or the newline) can still push a
+ * page over; that becomes a small fixed-shape `ResponseTooLarge` instead.
+ */
+export const renderBounded = (
+  response: Response,
+  json: boolean,
+): { readonly response: Response; readonly text: string } => {
+  const text = render(response, json)
+  const bytes = encoder.encode(text).length
+  if (bytes <= Query.limits.responseBytes) return { response, text }
+  const bounded = Query.failure(
+    response.op,
+    'ResponseTooLarge',
+    `The ${json ? 'compact' : 'pretty-printed'} JSON output would be ${bytes} bytes on stdout, over the ${Query.limits.responseBytes}-byte limit.`,
+    json
+      ? 'Request fewer items (--limit, --top, --children, --events) or narrow the filters. Identifiers are never shortened to fit.'
+      : 'Add --json (compact, no indentation) or request fewer items (--limit, --top, --children, --events) or narrow the filters. Identifiers are never shortened to fit.',
+    {
+      bytes,
+      limitBytes: Query.limits.responseBytes,
+      originalOutcome: response.ok ? 'ok' : response.error._tag,
+      output: json ? 'compact' : 'pretty',
+    },
+  )
+  return { response: bounded, text: render(bounded, json) }
+}
+
 /** Prints `response` and, for a failure, a stderr diagnostic and its exit code. */
-const emit = Effect.fnUntraced(function* (response: Response, json: boolean) {
-  yield* write(render(response, json), 'stdout')
+const emit = Effect.fnUntraced(function* (unbounded: Response, json: boolean) {
+  const { response, text } = renderBounded(unbounded, json)
+  yield* write(text, 'stdout')
   if (response.ok) return
   const code = exitCodes[response.error._tag]
   yield* write(
@@ -351,15 +384,20 @@ READING TIMINGS
   operation slow: there are no built-in budgets or baselines. State any threshold
   you apply yourself (e.g. --min-duration-ms is echoed in query).`
 
-const outputRules = (op: string) => `
+const outputRules = (op: string, emptyResults = true) => `
 OUTPUT
-  stdout   One JSON document: pretty-printed, or compact on one line with --json.
+  stdout   One JSON document: pretty-printed (2-space indent), or compact on one line
+           with --json, followed by a newline.
            Success: { "ok": true, "apiVersion": 1, "op": "${op}", "query", ..., "result" }.
            Failure: { "ok": false, "apiVersion": 1, "op", "error": { "_tag", "message",
-           "hint", ...details } }. Always at most 1048576 UTF-8 bytes.
+           "hint", ...details } }.
+           The complete stdout, as printed in the chosen mode and including the final
+           newline, is always at most 1048576 UTF-8 bytes. Pretty output is larger than
+           compact, so a page can fit with --json but not without it: that case is
+           ResponseTooLarge with error.output "pretty" (exit 6); add --json or ask for
+           fewer items.
   stderr   Empty on success. On failure one line "effect-inspect ${op}: TAG (exit N): message"
-           and a "hint:" line.
-  An empty result is a success: ok true, result.total 0, exit 0.
+           and a "hint:" line.${emptyResults ? '\n  An empty result is a success: ok true, result.total 0, exit 0.' : ''}
   Error messages from the query engine name request fields: sessionId = --session,
   spanId = --span, fromMs/toMs = --from-ms/--to-ms, minDurationMs = --min-duration-ms,
   minLevel = --min-level; limit, offset, top, children, events, status, sort, name and
@@ -381,7 +419,7 @@ const errorHelp: Readonly<Record<Query.ErrorTag, string>> = {
   SessionConflict:
     'SessionConflict: error.conflicts other runs announced this ID, so no data can be\n      attributed to one run. Relaunch with a new unique EFFECT_INSPECT_SESSION_ID.',
   ResponseTooLarge:
-    'ResponseTooLarge: the JSON would exceed 1048576 bytes (error.bytes, error.limitBytes;\n      error.originalOutcome is what it would have been). Lower --limit/--top/--children/\n      --events or narrow the filters; IDs are never shortened to fit.',
+    'ResponseTooLarge: the answer would exceed 1048576 bytes (error.limitBytes). Without\n      error.output, the query itself was too large as compact JSON (live: HTTP 413) and\n      error.bytes is that size; with error.output "pretty" or "compact", error.bytes is\n      the size stdout would have had in that mode. error.originalOutcome is what it\n      would have been. Add --json if output is "pretty", lower --limit/--top/\n      --children/--events or narrow the filters; IDs are never shortened to fit.',
   TraceFileError:
     'TraceFileError: --file could not be read, is empty, is not a trace, is from a newer\n      format, or is corrupt (error.file). Gzip is not supported.',
   CollectorUnavailable:
@@ -413,14 +451,16 @@ const spanErrors: ReadonlyArray<Query.ErrorTag> = [
   'CollectorError',
 ]
 
-const pagingRules = (max: number, fallback: number, order: string) => `
-PAGING
-  result is a page: { total, offset, limit, nextOffset, items }. total counts every
-  match; nextOffset is the --offset of the next page, or null on the last page.
-  --limit 1-${max} (default ${fallback}). Order: ${order}.
+const livePaging = `
   Live sessions that are still active (source.active true) can change between two
   calls, so offsets may shift; compare completeness.messagesObserved, wait until
   active is false, or export and page through the file for a stable walk.`
+
+const pagingRules = (max: number, fallback: number, order: string, consistency = livePaging) => `
+PAGING
+  result is a page: { total, offset, limit, nextOffset, items }. total counts every
+  match; nextOffset is the --offset of the next page, or null on the last page.
+  --limit 1-${max} (default ${fallback}). Order: ${order}.${consistency}`
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -473,7 +513,15 @@ RESULT
   conflicts     Refused reuses of the ID (queries for it fail with SessionConflict);
                 null = none recorded, which for an older client proves nothing.
   An empty collector gives total 0 and items [] with exit 0.
-${pagingRules(Query.limits.sessions.max, Query.limits.sessions.default, 'newest startedAtEpochMillis first')}
+${pagingRules(
+  Query.limits.sessions.max,
+  Query.limits.sessions.default,
+  'newest startedAtEpochMillis first',
+  `
+  Each call lists the collector's sessions at that moment: sessions that start
+  between two calls shift offsets. Compare result.total between pages, or use a
+  --limit large enough for one page.`,
+)}
 ${outputRules('sessions')}
 ${exitTable(['InvalidRequest', 'ResponseTooLarge', 'TraceFileError', 'CollectorUnavailable', 'CollectorError'])}
 `),
@@ -684,7 +732,8 @@ ${exitTable(sessionErrors)}
     {
       command:
         'effect-inspect spans --session failing-run-001 --sort outsideChildren --limit 5 --json',
-      description: 'Five completed spans with the most elapsed time outside recorded children',
+      description:
+        'Five spans ranked by elapsed time outside recorded children (completed first; open spans follow by elapsedLowerBoundMs)',
     },
     {
       command:
@@ -1012,7 +1061,7 @@ RESULT
     "result": { "sessionId": "failing-run-001", "file": "failing-run-001.eitrace",
                 "bytes": 5321 } }
   bytes          UTF-8 size of the file written. The trace itself never goes to stdout.
-${outputRules('export')}
+${outputRules('export', false)}
 ${exitTable(['InvalidRequest', 'SessionNotFound', 'ResponseTooLarge', 'CollectorUnavailable', 'CollectorError', 'OutputError'])}
   (ResponseTooLarge here only guards an oversized error reply.)
 `),

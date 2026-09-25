@@ -72,6 +72,23 @@ const noisy = Effect.forEach(
   (i) => Effect.logInfo(`${i} ${'x'.repeat(2100)}`),
 ).pipe(Effect.withSpan('noisy'))
 
+/**
+ * The final verifier's fixture: 500 Warn logs with 3000-character messages and
+ * 32 annotations of 600 "é". At 28 items compact JSON (~1.02 MB) fits the bound
+ * but the pretty rendering (~1.11 MB) does not; 29 items exceed it even compact.
+ */
+const annotated = Effect.forEach(
+  Array.from({ length: 500 }, (_, i) => i),
+  (i) =>
+    Effect.logWarning(`${i} ${'m'.repeat(3000)}`).pipe(
+      Effect.annotateLogs(
+        Object.fromEntries(Array.from({ length: 32 }, (_, k) => [`key${k}`, 'é'.repeat(600)])),
+      ),
+    ),
+).pipe(Effect.withSpan('annotated'))
+
+const stdoutBytes = (stdout: string) => Buffer.byteLength(stdout, 'utf8')
+
 const runTest = <E>(effect: Effect.Effect<void, E, HttpClient.HttpClient | Scope.Scope>) =>
   Effect.runPromise(Effect.scoped(effect).pipe(Effect.provide(FetchHttpClient.layer)))
 
@@ -288,6 +305,44 @@ describe('effect-inspect CLI queries', () => {
         const small = yield* cli('logs', '--session', 'cli-big-001', '--limit', '100', '--url', url)
         expect(small.exitCode).toBe(0)
         expect(small.json.result).toMatchObject({ total: 500, nextOffset: 100 })
+      }),
+    ))
+
+  it('holds the complete printed stdout to 1 MiB in pretty and compact modes, and recovers', () =>
+    runTest(
+      Effect.gen(function* () {
+        const { port, url } = yield* startCollector()
+        yield* instrumented(port, 'cli-pretty-001', annotated)
+        const page = (limit: string, ...mode: ReadonlyArray<string>) =>
+          cli('logs', '--session', 'cli-pretty-001', '--limit', limit, '--url', url, ...mode)
+
+        const pretty = yield* page('28')
+        expect(pretty.exitCode).toBe(6)
+        expect(stdoutBytes(pretty.stdout)).toBeLessThan(2000)
+        expect(pretty.json.error).toMatchObject({
+          _tag: 'ResponseTooLarge',
+          output: 'pretty',
+          originalOutcome: 'ok',
+          limitBytes: 1_048_576,
+        })
+        expect(pretty.json.error.bytes).toBeGreaterThan(1_048_576)
+        expect(pretty.json.error.hint).toContain('--json')
+        expect(pretty.stderr).toContain('ResponseTooLarge (exit 6)')
+
+        const compact = yield* page('28', '--json')
+        expect(compact.exitCode).toBe(0)
+        expect(stdoutBytes(compact.stdout)).toBeLessThanOrEqual(1_048_576)
+        expect(compact.json.result.items).toHaveLength(28)
+
+        const smaller = yield* page('25')
+        expect(smaller.exitCode).toBe(0)
+        expect(stdoutBytes(smaller.stdout)).toBeLessThanOrEqual(1_048_576)
+        expect(smaller.json.result.nextOffset).toBe(25)
+
+        // Over the bound even compact: the collector's own 413.
+        const tooMany = yield* page('29', '--json')
+        expect(tooMany.exitCode).toBe(6)
+        expect(tooMany.json.error.output).toBeUndefined()
       }),
     ))
 })
