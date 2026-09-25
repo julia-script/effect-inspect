@@ -31,6 +31,7 @@ class UpstreamUnavailable extends Data.TaggedError('UpstreamUnavailable')<{
 
 /** Kind `Fail`: an error the program's type says can happen. */
 const typedFailure = Effect.gen(function* () {
+  yield* Effect.logInfo('charging card **** 4242')
   yield* Effect.sleep('20 millis')
   return yield* new PaymentDeclined({ card: '**** 4242' })
 }).pipe(Effect.withSpan('charge.card'), Effect.ignore, Effect.withSpan('typed-error'))

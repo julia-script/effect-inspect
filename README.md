@@ -111,6 +111,32 @@ client is treated as one run per ID and reconnects as before. An older
 collector ignores the instance ID and merges runs that reuse an ID into one
 session.
 
+## Querying runs from the command line
+
+Coding agents (and people) can query a run as JSON instead of opening the web
+UI. Pick the session ID before launch, then ask for exactly that run:
+
+```bash
+npx effect-inspect start                                   # terminal 1, leave running
+EFFECT_INSPECT_SESSION_ID=checkout-fail-001 bun my-program.ts
+npx effect-inspect summary --session checkout-fail-001 --json
+npx effect-inspect spans   --session checkout-fail-001 --status failed --json
+npx effect-inspect span    --session checkout-fail-001 --span SPAN_ID --json
+npx effect-inspect logs    --session checkout-fail-001 --span SPAN_ID --json
+npx effect-inspect export  --session checkout-fail-001 --out checkout-fail-001.eitrace --json
+npx effect-inspect summary --file checkout-fail-001.eitrace --json   # no collector needed
+```
+
+Live queries need `--session`; the newest session is never assumed, and an
+unknown or reused ID fails with its own error instead of answering for another
+run. Every command prints one JSON document on stdout (at most 1 MiB), a
+diagnostic on stderr on failure, and a distinct exit code per outcome. The
+collector address is `--url`, else `http://localhost:$EFFECT_INSPECT_PORT`,
+else port 34437. `npx effect-inspect --help` and `npx effect-inspect <command>
+--help` are the full reference: flags, defaults, JSON fields, errors and what
+to try next. Durations are observed elapsed time, not CPU time or a slowness
+verdict.
+
 ## Saving and loading traces
 
 **save** in the header writes the selected session to a `.eitrace` file.

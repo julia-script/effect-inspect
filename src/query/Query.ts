@@ -295,6 +295,8 @@ export type ErrorTag =
   | 'CollectorUnavailable'
   | 'CollectorError'
   | 'ResponseTooLarge'
+  /** CLI only: `export` could not write its output file. */
+  | 'OutputError'
 
 /** Every failed query, whatever the source or transport. */
 export interface QueryFailure {
