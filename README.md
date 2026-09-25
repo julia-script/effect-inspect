@@ -120,4 +120,5 @@ bun run check         # format, lint, typecheck — must pass before a commit
 bun run check:write   # auto-fix what it can
 bun test src app      # unit tests
 bun run stub:collector  # fake collector, for working on the webapp alone
+bun run dev:app       # webapp dev server on http://localhost:34438
 ```
