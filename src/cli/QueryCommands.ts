@@ -340,6 +340,15 @@ CONTEXT FIELDS (every successful per-session response)
                  microsecond resolution. Wall clock = startedAtEpochMillis + ms. Values
                  can be negative (work that began before the client). observedFromMs /
                  observedUntilMs: earliest / latest retained timestamp, null when none.
+  termination    state "active" (still connected at snapshot time; open spans may still
+                 end), "ended" (the collector recorded a disconnect) or "unknown" (no
+                 end time on record). lastObservedMs (= observedUntilMs), endedAtMs
+                 (the disconnect in session ms, from the collector's wall clock, so
+                 approximate; null unless ended), unobservedTailMs (endedAtMs -
+                 lastObservedMs: time before the disconnect with nothing retained).
+                 The protocol has no end-of-session message: a crash, a kill, a clean
+                 exit and a dropped connection look the same, so open spans at the end
+                 do not by themselves establish a crash.
   completeness   status: "noLossRecorded" (collector counters known, all loss/gap
                  counters 0 - still not proof nothing is missing), "lossRecorded" (some
                  counter > 0: evidence is partial), or "unknown" (source never kept
@@ -560,7 +569,8 @@ const summaryCommand = Command.make(
   ),
   Command.withDescription(
     text(`
-Overview of one session: span counts by status, failures, the longest spans, the spans
+Overview of one session: notices, span counts by status, failures, unfinished spans
+and where they were last recorded, the longest completed spans, the spans
 with the most time outside recorded children, still-open spans, per-name totals, log
 counts by level and memory samples, plus how complete the evidence is. Start every
 investigation here, then drill down with \`spans\`, \`span\` and \`logs\`.
@@ -569,9 +579,12 @@ ${sourceRules}
 RESULT (abbreviated; lists hold at most --top items)
   { "ok": true, "apiVersion": 1, "op": "summary",
     "query": { "op": "summary", "sessionId": "failing-run-001", "top": 5 },
+    "notices": [],
     "source": { "kind": "live", "sessionId": "failing-run-001", "active": false, ... },
     "time": { "unit": "ms", "reference": "sessionStart",
               "observedFromMs": -1.348, "observedUntilMs": 240.867 },
+    "termination": { "state": "ended", "lastObservedMs": 240.867, "endedAtMs": 243,
+                     "unobservedTailMs": 2.133 },
     "completeness": { "status": "noLossRecorded", "openSpans": 0, ... },
     "conflict": { "count": 0, "detection": "enforced" },
     "result": {
@@ -581,6 +594,7 @@ RESULT (abbreviated; lists hold at most --top items)
       "memory": { "samples": 2, "peakHeapUsedBytes": 7158493, "peakRssBytes": 61489152,
                   "lastHeapUsedBytes": 7158493 },
       "failures": { "total": 4, "items": [ SPAN ITEM, ... ] },
+      "unfinished": { "open": 0, "innermost": { "total": 0, "items": [] } },
       "longest": [ SPAN ITEM, ... ],
       "largestOutsideChildren": [ SPAN ITEM, ... ],
       "longestOpen": [ SPAN ITEM, ... ],
@@ -589,10 +603,22 @@ RESULT (abbreviated; lists hold at most --top items)
         "maxDurationMs": 241.993, "totalOutsideChildrenMs": 0.658 }, ... ] } } }
 
 RESULT FIELDS
+  notices          Top level, before result: { code, message } facts easy to miss.
+                   openSpans (spans without a recorded end, the termination state
+                   and the last recorded position), rankingsCompletedOnly (longest and
+                   largestOutsideChildren skip open spans), collectorEvicted (oldest
+                   messages evicted at capacity: data before observedFromMs is
+                   missing). Messages state facts; explanations are possibilities.
   spans            Counts by status. failures lists error and defect spans (not
                    interruptions), earliest start first; failures.total counts all.
-  longest          Completed spans, largest durationMs first.
-  largestOutsideChildren  Completed spans, largest outsideChildrenMs first.
+  unfinished       open: spans without a recorded end. innermost: open spans with no
+                   open child - the last recorded position on each open chain, not a
+                   cause - largest elapsedLowerBoundMs first. Each is a SPAN ITEM plus
+                   openAncestors: { items: [ { spanId, name, nameTruncated, status,
+                   startMs, durationMs } ], truncated }: contiguous open ancestors,
+                   root-most first, at most 32 nearest; truncated marks more above.
+  longest          Completed spans only, largest durationMs first.
+  largestOutsideChildren  Completed spans only, largest outsideChildrenMs first.
   longestOpen      Open spans, largest elapsedLowerBoundMs first.
   names            Groups by full span name, largest totalDurationMs first. Sums cover
                    completed spans; nested and concurrent spans overlap, so totals can
@@ -695,9 +721,12 @@ FILTERS (all combine with AND)
 
 ORDER (--sort)
   start            startMs ascending (default).
-  duration         durationMs descending; open spans after completed ones, by
-                   elapsedLowerBoundMs descending.
-  outsideChildren  outsideChildrenMs descending; open spans last, as above.
+  duration         durationMs descending. Open spans are interleaved by
+                   elapsedLowerBoundMs: their true duration is at least that.
+  outsideChildren  outsideChildrenMs descending. Open spans are interleaved by the
+                   time so far no recorded child covered (open children count as
+                   covering up to observedUntilMs): a lower bound, not shown in the
+                   item (their outsideChildrenMs is null).
   Ties: startMs, then spanId.
 ${pagingRules(Query.limits.spans.max, Query.limits.spans.default, 'as --sort')}
 
@@ -733,7 +762,7 @@ ${exitTable(sessionErrors)}
       command:
         'effect-inspect spans --session failing-run-001 --sort outsideChildren --limit 5 --json',
       description:
-        'Five spans ranked by elapsed time outside recorded children (completed first; open spans follow by elapsedLowerBoundMs)',
+        'Five spans ranked by elapsed time outside recorded children (open spans by a lower bound)',
     },
     {
       command:

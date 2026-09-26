@@ -133,10 +133,10 @@ describe('Query timing', () => {
     ])
     const spans = ok(source, { op: 'spans', sort: 'duration' })
     const items = spans.op === 'spans' ? spans.result.items : []
-    // Completed spans rank first; open ones follow by elapsed lower bound.
+    // Open spans interleave by elapsed lower bound (root >= 395 ranks above done = 390).
     expect(items.map((item) => [item.spanId, item.status])).toEqual([
-      ['done', 'ok'],
       ['root', 'open'],
+      ['done', 'ok'],
       ['waiting', 'open'],
     ])
     const root = items.find((item) => item.spanId === 'root')
@@ -149,6 +149,56 @@ describe('Query timing', () => {
     expect(
       summary.op === 'summary' && summary.result.longestOpen.map((item) => item.spanId),
     ).toEqual(['root', 'waiting'])
+  })
+
+  it('puts notices and the innermost unfinished span of an ended session first', () => {
+    const messages = [
+      start('root', 0),
+      start('work', 10, 'root'),
+      start('step', 20, 'work'),
+      start('done', 30, 'work'),
+      end('done', 40),
+      log(100, 'last'),
+    ]
+    // Disconnect recorded at 1000 ms; 5 oldest messages evicted.
+    const summary = ok(live(messages, {}, { ...zeroCapture, droppedMessages: 5 }), {
+      op: 'summary',
+    }) as Query.SummaryResponse
+    expect(Object.keys(summary).indexOf('notices')).toBeLessThan(
+      Object.keys(summary).indexOf('result'),
+    )
+    const keys = Object.keys(summary.result)
+    expect(keys.indexOf('unfinished')).toBeLessThan(keys.indexOf('longest'))
+    expect(summary.termination).toEqual({
+      state: 'ended',
+      lastObservedMs: 100,
+      endedAtMs: 1000,
+      unobservedTailMs: 900,
+    })
+    const { unfinished } = summary.result
+    expect(unfinished.open).toBe(3)
+    expect(unfinished.innermost.items.map((item) => item.spanId)).toEqual(['step'])
+    expect(unfinished.innermost.items[0]!.openAncestors).toEqual({
+      items: [
+        expect.objectContaining({ spanId: 'root', status: 'open' }),
+        expect.objectContaining({ spanId: 'work', status: 'open' }),
+      ],
+      truncated: false,
+    })
+    expect(summary.notices.map((notice) => notice.code)).toEqual([
+      'openSpans',
+      'rankingsCompletedOnly',
+      'collectorEvicted',
+    ])
+    expect(summary.notices[0]!.message).toContain('900 ms after the last retained message')
+    expect(summary.notices[0]!.message).toContain('"step"')
+
+    const active = ok(live(messages, { active: true, endedAtEpochMillis: undefined }), {
+      op: 'summary',
+    }) as Query.SummaryResponse
+    expect(active.termination.state).toBe('active')
+    expect(active.notices[0]!.message).toContain('may still end')
+    expect(JSON.stringify(active.notices)).not.toContain('crash')
   })
 
   it('treats an open child of a closed span as covering it up to the parent end', () => {

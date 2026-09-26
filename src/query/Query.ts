@@ -461,10 +461,33 @@ export interface ConflictInfo {
   readonly detection: 'enforced' | 'unavailable' | 'unknown'
 }
 
+/**
+ * How the session ended, as far as the collector knows. The protocol has no
+ * end-of-session message: a crash, a kill, a clean exit and a dropped
+ * connection all look the same here, so open spans at the end do not by
+ * themselves establish a crash. `state`:
+ * - `active`: still connected at snapshot time; open spans may still end.
+ * - `ended`: the collector recorded a disconnect.
+ * - `unknown`: no end time is on record.
+ */
+export interface Termination {
+  readonly state: 'active' | 'ended' | 'unknown'
+  /** Latest retained timestamp (= `time.observedUntilMs`). */
+  readonly lastObservedMs: number | null
+  /**
+   * When the collector recorded the disconnect, in session ms. Taken from the
+   * collector's wall clock, not the client's, so approximate.
+   */
+  readonly endedAtMs: number | null
+  /** `endedAtMs - lastObservedMs`: time before the disconnect with nothing retained. */
+  readonly unobservedTailMs: number | null
+}
+
 /** Shared context of every successful per-session response. */
 export interface Context {
   readonly source: SourceInfo
   readonly time: TimeInfo
+  readonly termination: Termination
   readonly completeness: Completeness
   readonly conflict: ConflictInfo
 }
@@ -604,6 +627,22 @@ export interface NameGroup {
   readonly totalOutsideChildrenMs: number
 }
 
+/** An open span with no open child: the last recorded position on its open chain. */
+export interface UnfinishedSpan extends SpanItem {
+  /** Contiguous open ancestors, root-most first, ending at the direct parent. */
+  readonly openAncestors: {
+    readonly items: ReadonlyArray<SpanRef>
+    /** More open ancestors exist above the first item. */
+    readonly truncated: boolean
+  }
+}
+
+/** A plain factual statement about the evidence; possible explanations are phrased as such. */
+export interface Notice {
+  readonly code: 'openSpans' | 'rankingsCompletedOnly' | 'collectorEvicted'
+  readonly message: string
+}
+
 export interface Summary {
   readonly spans: {
     readonly total: number
@@ -626,6 +665,14 @@ export interface Summary {
   } | null
   /** `error`/`defect` spans (not interruptions), earliest start first. */
   readonly failures: { readonly total: number; readonly items: ReadonlyArray<SpanItem> }
+  /**
+   * Spans with no recorded end. `innermost`: open spans without an open child,
+   * largest `elapsedLowerBoundMs` first, each with its open ancestor chain.
+   */
+  readonly unfinished: {
+    readonly open: number
+    readonly innermost: { readonly total: number; readonly items: ReadonlyArray<UnfinishedSpan> }
+  }
   /** Completed spans, largest `durationMs` first. */
   readonly longest: ReadonlyArray<SpanItem>
   /** Completed spans, largest `outsideChildrenMs` first. */
@@ -662,7 +709,9 @@ interface Success<Op extends string, R> {
 export type SessionsResponse = Success<'sessions', SessionsResult> & {
   readonly source: { readonly kind: 'live' | 'file'; readonly file: string | null }
 }
-export type SummaryResponse = Success<'summary', Summary> & Context
+export type SummaryResponse = Success<'summary', Summary> & {
+  readonly notices: ReadonlyArray<Notice>
+} & Context
 /**
  * How `fromMs`/`toMs` were applied to `spans`, or `null` without either:
  * spans whose `[startMs, endMs]` (open: `[startMs, observedUntilMs]`)
@@ -773,6 +822,8 @@ class Analysis {
   readonly outOfOrder: number
   readonly clientDropped: number
   private readonly items = new Map<string, SpanItem>()
+  /** Open spans: time so far not covered by a recorded child, a lower bound. */
+  readonly openOutside = new Map<string, number>()
 
   constructor(readonly source: TraceSource) {
     const store = this.store
@@ -843,6 +894,7 @@ class Analysis {
     }
     const closed = span.end !== undefined
     const { total, self } = timings(this.store, span, this.now)
+    if (!closed) this.openOutside.set(span.spanId, ms(self))
     const error =
       span.outcome?._tag === 'Failure'
         ? (() => {
@@ -893,6 +945,14 @@ class Analysis {
     else if (capture === undefined) status = 'unknown'
     let detection: ConflictInfo['detection'] = 'unknown'
     if (capture !== undefined) detection = capture.conflictDetection ? 'enforced' : 'unavailable'
+    const lastObservedMs = this.observedUntil === undefined ? null : ms(this.observedUntil)
+    const endedAtMs =
+      session.endedAtEpochMillis === undefined
+        ? null
+        : ms(session.endedAtEpochMillis - session.clock.wallClockEpochMillis)
+    let state: Termination['state'] = 'unknown'
+    if (session.active) state = 'active'
+    else if (endedAtMs !== null) state = 'ended'
     return {
       source: {
         kind: source.kind,
@@ -908,7 +968,14 @@ class Analysis {
         unit: 'ms',
         reference: 'sessionStart',
         observedFromMs: this.observedFrom === undefined ? null : ms(this.observedFrom),
-        observedUntilMs: this.observedUntil === undefined ? null : ms(this.observedUntil),
+        observedUntilMs: lastObservedMs,
+      },
+      termination: {
+        state,
+        lastObservedMs,
+        endedAtMs,
+        unobservedTailMs:
+          endedAtMs === null || lastObservedMs === null ? null : ms(endedAtMs - lastObservedMs),
       },
       completeness: {
         status,
@@ -937,21 +1004,44 @@ const page = <A>(all: ReadonlyArray<A>, offset: number, limit: number): Page<A> 
 const byStart = (a: SpanItem, b: SpanItem): number =>
   a.startMs - b.startMs || (a.spanId < b.spanId ? -1 : Number(a.spanId > b.spanId))
 
-/** Completed spans by `measure` descending, then open spans by lower bound; ties by start. */
+/** `measure` descending, ties by start. */
 const ranked =
-  (measure: 'durationMs' | 'outsideChildrenMs') =>
-  (a: SpanItem, b: SpanItem): number => {
-    const aOpen = a.endMs === null
-    const bOpen = b.endMs === null
-    if (aOpen !== bOpen) return aOpen ? 1 : -1
-    const key = aOpen ? 'elapsedLowerBoundMs' : measure
-    return b[key]! - a[key]! || byStart(a, b)
-  }
+  (measure: (item: SpanItem) => number) =>
+  (a: SpanItem, b: SpanItem): number =>
+    measure(b) - measure(a) || byStart(a, b)
 
-const sorters: Record<SpanSort, (a: SpanItem, b: SpanItem) => number> = {
-  start: byStart,
-  duration: ranked('durationMs'),
-  outsideChildren: ranked('outsideChildrenMs'),
+/**
+ * Open spans interleave with completed ones by a lower bound of the measure:
+ * `elapsedLowerBoundMs` for duration, and for outside-children time the part
+ * of it no recorded child covered so far (open children counted up to now).
+ */
+const sorter = (sort: SpanSort, analysis: Analysis): ((a: SpanItem, b: SpanItem) => number) => {
+  if (sort === 'start') return byStart
+  if (sort === 'duration') return ranked((item) => item.durationMs ?? item.elapsedLowerBoundMs!)
+  return ranked((item) => item.outsideChildrenMs ?? analysis.openOutside.get(item.spanId)!)
+}
+
+/** Nearest `limits.ancestry` ancestors, root-most first; with `openOnly`, only the contiguous open ones. */
+const ancestry = (analysis: Analysis, span: TraceSpan, openOnly: boolean) => {
+  const { store } = analysis
+  const items: Array<SpanRef> = []
+  const seen = new Set([span.spanId])
+  let parent = span.parentId === undefined ? undefined : store.spans.get(span.parentId)
+  let truncated = false
+  while (
+    parent !== undefined &&
+    !seen.has(parent.spanId) &&
+    !(openOnly && parent.end !== undefined)
+  ) {
+    if (items.length === limits.ancestry) {
+      truncated = true
+      break
+    }
+    seen.add(parent.spanId)
+    items.push(ref(analysis, parent))
+    parent = parent.parentId === undefined ? undefined : store.spans.get(parent.parentId)
+  }
+  return { items: items.reverse(), truncated }
 }
 
 const summarize = (analysis: Analysis, top: number): Summary => {
@@ -990,6 +1080,8 @@ const summarize = (analysis: Analysis, top: number): Summary => {
   for (const log of analysis.store.logs) byLevel[log.level] = (byLevel[log.level] ?? 0) + 1
 
   const completed = items.filter((item) => item.endMs !== null)
+  const open = items.filter((item) => item.endMs === null).sort(sorter('duration', analysis))
+  const innermost = open.filter((item) => item.openChildCount === 0)
   const failures = items
     .filter((item) => item.status === 'error' || item.status === 'defect')
     .sort(byStart)
@@ -1009,12 +1101,19 @@ const summarize = (analysis: Analysis, top: number): Summary => {
             lastHeapUsedBytes: last.heapUsed,
           },
     failures: { total: failures.length, items: failures.slice(0, top) },
-    longest: completed.toSorted(sorters.duration).slice(0, top),
-    largestOutsideChildren: completed.toSorted(sorters.outsideChildren).slice(0, top),
-    longestOpen: items
-      .filter((item) => item.endMs === null)
-      .sort(sorters.duration)
-      .slice(0, top),
+    unfinished: {
+      open: open.length,
+      innermost: {
+        total: innermost.length,
+        items: innermost.slice(0, top).map((item) => ({
+          ...item,
+          openAncestors: ancestry(analysis, store.spans.get(item.spanId)!, true),
+        })),
+      },
+    },
+    longest: completed.toSorted(sorter('duration', analysis)).slice(0, top),
+    largestOutsideChildren: completed.toSorted(sorter('outsideChildren', analysis)).slice(0, top),
+    longestOpen: open.slice(0, top),
     names: {
       total: groups.size,
       items: [...groups.values()]
@@ -1052,19 +1151,6 @@ const detail = (
   eventLimit: number,
 ): SpanDetail => {
   const { store } = analysis
-  const ancestry: Array<SpanRef> = []
-  const seen = new Set([span.spanId])
-  let parent = span.parentId === undefined ? undefined : store.spans.get(span.parentId)
-  let truncated = false
-  while (parent !== undefined && !seen.has(parent.spanId)) {
-    if (ancestry.length === limits.ancestry) {
-      truncated = true
-      break
-    }
-    seen.add(parent.spanId)
-    ancestry.push(ref(analysis, parent))
-    parent = parent.parentId === undefined ? undefined : store.spans.get(parent.parentId)
-  }
   const external = analysis.externalParents.get(span.spanId)
   let parentInfo: SpanDetail['parent'] = { kind: 'none' }
   if (external !== undefined) {
@@ -1089,7 +1175,7 @@ const detail = (
     stack: stack?.text ?? null,
     stackTruncated: stack?.truncated ?? false,
     parent: parentInfo,
-    ancestry: { items: ancestry.reverse(), truncated },
+    ancestry: ancestry(analysis, span, false),
     children: { total: children.length, items: children.slice(0, childLimit) },
     events: {
       total: events.length,
@@ -1134,6 +1220,45 @@ const spanNotFound = (op: string, spanId: string, analysis: Analysis): QueryFail
       completeness: analysis.context().completeness,
     },
   )
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+
+/** Facts a reader of `summary` could otherwise miss, most important first. */
+const notices = (context: Context, unfinished: Summary['unfinished']): Array<Notice> => {
+  const out: Array<Notice> = []
+  const { termination, completeness, time } = context
+  if (unfinished.open > 0) {
+    const spans = plural(unfinished.open, 'span')
+    const first = unfinished.innermost.items[0]
+    const position =
+      first === undefined
+        ? ''
+        : ` Last recorded position: "${first.name}" (spanId ${first.spanId}), open for at least ${first.elapsedLowerBoundMs} ms, innermost of ${plural(unfinished.innermost.total, 'open chain')}; see result.unfinished.`
+    let message: string
+    if (termination.state === 'active') {
+      message = `${spans} had no recorded end at snapshot time and the program is still connected; they may still end.${position}`
+    } else {
+      const ended =
+        termination.state === 'ended'
+          ? `the collector recorded a disconnect at ${termination.endedAtMs} ms${termination.unobservedTailMs === null ? '' : `, ${termination.unobservedTailMs} ms after the last retained message, with nothing retained in between`}`
+          : 'no session end time is on record'
+      message = `${spans} had no recorded end; ${ended}.${position} The protocol has no end-of-session message, so a crash, a kill, an exit without closing spans and a dropped connection look the same; missing ends alone do not establish which, and an end may also have been sent but lost.`
+    }
+    out.push({ code: 'openSpans', message })
+    out.push({
+      code: 'rankingsCompletedOnly',
+      message: `result.longest and result.largestOutsideChildren rank completed spans only; the ${spans} without an end are in result.unfinished and result.longestOpen.`,
+    })
+  }
+  const evicted = completeness.collectorDroppedMessages ?? 0
+  if (evicted > 0) {
+    out.push({
+      code: 'collectorEvicted',
+      message: `The collector evicted the oldest ${plural(evicted, 'message')} of this session at its capacity: data before observedFromMs (${time.observedFromMs} ms) is missing, so earlier spans, logs and memory samples are absent and retained spans may lack their start or parent.`,
+    })
+  }
+  return out
+}
 
 // ---------------------------------------------------------------------------
 // Entry points
@@ -1214,13 +1339,15 @@ const answer = (source: TraceSource, request: SessionQuery): QueryResponse => {
   switch (request.op) {
     case 'summary': {
       const top = request.top ?? limits.top.default
+      const result = summarize(analysis, top)
       return {
         ok: true,
         apiVersion,
         op: 'summary',
         query: { op, sessionId, top },
+        notices: notices(context, result.unfinished),
         ...context,
-        result: summarize(analysis, top),
+        result,
       }
     }
     case 'spans': {
@@ -1242,7 +1369,7 @@ const answer = (source: TraceSource, request: SessionQuery): QueryResponse => {
         if (request.minDurationMs !== undefined && measured < request.minDurationMs) continue
         matched.push(item)
       }
-      matched.sort(sorters[sort])
+      matched.sort(sorter(sort, analysis))
       return {
         ok: true,
         apiVersion,
