@@ -144,6 +144,22 @@ describe('Query timing', () => {
     expect(root?.outsideChildrenMs).toBeNull()
     expect(root?.elapsedLowerBoundMs).toBe(395)
     expect(spans.completeness.openSpans).toBe(2)
+    // outsideChildren ranks an open span by its uncovered time so far (51 > short's 10).
+    const uncovered = ok(
+      live([
+        start('open', 0),
+        start('short', 0),
+        end('short', 10),
+        start('tail', 50),
+        end('tail', 51),
+      ]),
+      { op: 'spans', sort: 'outsideChildren' },
+    )
+    expect(uncovered.op === 'spans' && uncovered.result.items.map((item) => item.spanId)).toEqual([
+      'open',
+      'short',
+      'tail',
+    ])
 
     const summary = ok(source, { op: 'summary' })
     expect(

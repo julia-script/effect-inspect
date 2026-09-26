@@ -327,6 +327,12 @@ COLLECTOR ADDRESS (live only)
 
 const context = `
 CONTEXT FIELDS (every successful per-session response)
+  Top-level siblings of result, never inside it (.completeness, not
+  .result.completeness). result's own fields are listed above (RESULT FIELDS /
+  SPAN ITEM FIELDS); root \`effect-inspect --help\` has the JSON SHAPE overview.
+  notices        summary only, top level: read it first. { code, message } facts easy
+                 to miss (open spans, eviction, sampling gaps); run \`summary\` before
+                 drilling down with other commands.
   query          The request as applied, defaults filled in. Check it to confirm
                  which filters were used.
   source         kind "live"|"file", file (path or null), sessionId (exact), program,
@@ -744,7 +750,8 @@ RESULT (abbreviated)
   { "ok": true, "apiVersion": 1, "op": "spans",
     "query": { "op": "spans", "sessionId": "failing-run-001", "status": "failed",
                "sort": "start", "limit": 20, "offset": 0 },
-    "source": { ... }, "time": { ... }, "completeness": { ... }, "conflict": { ... },
+    "source": { ... }, "time": { ... }, "termination": { ... },
+    "completeness": { ... }, "conflict": { ... },
     "window": null,
     "result": { "total": 5, "offset": 0, "limit": 20, "nextOffset": null, "items": [
       { "spanId": "0a40c31fbf88b7db", "traceId": "9d502fd678d8f15c0328b182dc1e3509",
@@ -834,7 +841,8 @@ RESULT (abbreviated): a SPAN ITEM plus the fields below
   { "ok": true, "apiVersion": 1, "op": "span",
     "query": { "op": "span", "sessionId": "failing-run-001",
                "spanId": "0a40c31fbf88b7db", "children": 20, "events": 20 },
-    "source": { ... }, "time": { ... }, "completeness": { ... }, "conflict": { ... },
+    "source": { ... }, "time": { ... }, "termination": { ... },
+    "completeness": { ... }, "conflict": { ... },
     "result": { "spanId": "0a40c31fbf88b7db", "name": "charge.card", "status": "error",
       ...other SPAN ITEM fields...,
       "attributes": { "entries": [], "omittedKeys": 0 },
@@ -965,7 +973,8 @@ RESULT (abbreviated)
   { "ok": true, "apiVersion": 1, "op": "logs",
     "query": { "op": "logs", "sessionId": "failing-run-001",
                "spanId": "0a40c31fbf88b7db", "scope": "subtree", "limit": 50, "offset": 0 },
-    "source": { ... }, "time": { ... }, "completeness": { ... }, "conflict": { ... },
+    "source": { ... }, "time": { ... }, "termination": { ... },
+    "completeness": { ... }, "conflict": { ... },
     "window": null,
     "result": { "total": 1, "offset": 0, "limit": 50, "nextOffset": null, "items": [
       { "timeMs": -0.506, "level": "Info", "message": "charging card **** 4242",

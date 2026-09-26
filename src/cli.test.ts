@@ -188,6 +188,10 @@ describe('effect-inspect CLI queries', () => {
         expect(summary.exitCode).toBe(0)
         expect(summary.stderr).toBe('')
         expect(summary.json.source.sessionId).toBe('cli-a-001')
+        // Root help's JSON SHAPE names every top-level key a real summary has.
+        const shape = run('--help').stdout.toString().split('JSON SHAPE')[1]!.split('EVIDENCE')[0]!
+        for (const key of Object.keys(summary.json))
+          expect(shape).toMatch(new RegExp(`\\b${key}\\b`))
         expect(summary.json.result.failures.items.map((s: { name: string }) => s.name)).toEqual([
           'checkout.charge',
         ])
