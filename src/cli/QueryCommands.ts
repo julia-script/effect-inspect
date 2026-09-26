@@ -608,7 +608,9 @@ RESULT FIELDS
                    and the last recorded position), rankingsCompletedOnly (longest and
                    largestOutsideChildren skip open spans), collectorEvicted (oldest
                    messages evicted at capacity: data before observedFromMs is
-                   missing). Messages state facts; explanations are possibilities.
+                   missing), memorySamplingGap (the largest gap between memory
+                   samples exceeds 10x the median). Messages state facts;
+                   explanations are possibilities.
   spans            Counts by status. failures lists error and defect spans (not
                    interruptions), earliest start first; failures.total counts all.
   unfinished       open: spans without a recorded end. innermost: open spans with no
@@ -624,8 +626,16 @@ RESULT FIELDS
                    completed spans; nested and concurrent spans overlap, so totals can
                    exceed the run's wall time. failed counts every failure incl.
                    interruptions.
-  logs.byLevel     Only levels that occur. memory: { samples, peakHeapUsedBytes,
-                   peakRssBytes, lastHeapUsedBytes } or null without samples.
+  logs.byLevel     Only levels that occur.
+  memory           Process-wide samples (all work in the process), or null without
+                   samples: { samples, peakHeapUsedBytes, peakHeapAtMs, peakRssBytes,
+                   lastHeapUsedBytes, firstSampleMs, lastSampleMs, medianIntervalMs,
+                   maxGapMs, maxGapFromMs, maxGapToMs, spansActiveAtPeak }. Periodic
+                   samples miss peaks between them; maxGapMs is the longest stretch
+                   with no sample. spansActiveAtPeak: { total, items: [ { spanId,
+                   name, nameTruncated, status, startMs, durationMs } ] }, the
+                   innermost spans active at peakHeapAtMs - active at that time only,
+                   not shown to be what the heap in use belongs to.
 ${spanItem}
 ${context}
 ${timing}
@@ -861,6 +871,11 @@ RESULT FIELDS
                  { name, nameTruncated, timeMs, attributes }. Effect logs emitted inside
                  the span are also recorded as its events (as above); use \`logs --span\`
                  for their level and message.
+  processMemory  Process-wide memory samples within the span's interval (open: up to
+                 observedUntilMs): { samples, firstSampleMs, lastSampleMs,
+                 firstHeapUsedBytes, lastHeapUsedBytes, maxHeapUsedBytes }, or null
+                 when no sample falls in range. Includes all concurrent work in the
+                 process; not what this span itself used or kept.
 ${spanItem}
 ${context}
 ${timing}

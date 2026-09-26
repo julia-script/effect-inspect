@@ -560,6 +560,20 @@ export interface SpanRef {
   readonly durationMs: number | null
 }
 
+/**
+ * Process-wide memory samples within a span's interval (open: up to
+ * `observedUntilMs`). Includes all concurrent work in the process; not what
+ * the span itself used or kept.
+ */
+export interface ProcessMemory {
+  readonly samples: number
+  readonly firstSampleMs: number
+  readonly lastSampleMs: number
+  readonly firstHeapUsedBytes: number
+  readonly lastHeapUsedBytes: number
+  readonly maxHeapUsedBytes: number
+}
+
 export interface SpanDetail extends SpanItem {
   readonly attributes: BoundedAttributes
   readonly stack: string | null
@@ -587,6 +601,8 @@ export interface SpanDetail extends SpanItem {
       readonly attributes: BoundedAttributes
     }>
   }
+  /** `null` when no memory sample falls in the span's interval. */
+  readonly processMemory: ProcessMemory | null
 }
 
 export interface LogItem {
@@ -639,7 +655,7 @@ export interface UnfinishedSpan extends SpanItem {
 
 /** A plain factual statement about the evidence; possible explanations are phrased as such. */
 export interface Notice {
-  readonly code: 'openSpans' | 'rankingsCompletedOnly' | 'collectorEvicted'
+  readonly code: 'openSpans' | 'rankingsCompletedOnly' | 'collectorEvicted' | 'memorySamplingGap'
   readonly message: string
 }
 
@@ -657,11 +673,31 @@ export interface Summary {
     readonly total: number
     readonly byLevel: Partial<Record<Protocol.LogLevel, number>>
   }
+  /**
+   * Process-wide memory samples (all work in the process, not per span).
+   * Samples are periodic, so peaks between samples are not seen.
+   */
   readonly memory: {
     readonly samples: number
     readonly peakHeapUsedBytes: number
+    /** Time of the first sample with `peakHeapUsedBytes`. */
+    readonly peakHeapAtMs: number
     readonly peakRssBytes: number
     readonly lastHeapUsedBytes: number
+    readonly firstSampleMs: number
+    readonly lastSampleMs: number
+    /** Median time between consecutive samples; `null` with one sample. */
+    readonly medianIntervalMs: number | null
+    /** Largest time between consecutive samples, from `maxGapFromMs` to `maxGapToMs`; `null` with one sample. */
+    readonly maxGapMs: number | null
+    readonly maxGapFromMs: number | null
+    readonly maxGapToMs: number | null
+    /**
+     * Innermost spans active at `peakHeapAtMs` (none of their children active
+     * then), earliest start first. Active at that time only: they are not
+     * shown to be the source of the heap in use.
+     */
+    readonly spansActiveAtPeak: { readonly total: number; readonly items: ReadonlyArray<SpanRef> }
   } | null
   /** `error`/`defect` spans (not interruptions), earliest start first. */
   readonly failures: { readonly total: number; readonly items: ReadonlyArray<SpanItem> }
@@ -1086,20 +1122,11 @@ const summarize = (analysis: Analysis, top: number): Summary => {
     .filter((item) => item.status === 'error' || item.status === 'defect')
     .sort(byStart)
   const { store } = analysis
-  const last = store.memory.at(-1)
   return {
     spans: counts,
     spanEvents: store.stats().events,
     logs: { total: store.logs.length, byLevel },
-    memory:
-      last === undefined
-        ? null
-        : {
-            samples: store.memory.length,
-            peakHeapUsedBytes: store.memoryPeak,
-            peakRssBytes: store.memoryRssPeak,
-            lastHeapUsedBytes: last.heapUsed,
-          },
+    memory: memorySummary(analysis, top),
     failures: { total: failures.length, items: failures.slice(0, top) },
     unfinished: {
       open: open.length,
@@ -1129,6 +1156,61 @@ const summarize = (analysis: Analysis, top: number): Summary => {
         )
         .slice(0, top),
     },
+  }
+}
+
+const memorySummary = (analysis: Analysis, top: number): Summary['memory'] => {
+  const { store } = analysis
+  const samples = store.memory
+  const first = samples[0]
+  const last = samples.at(-1)
+  if (first === undefined || last === undefined) return null
+  const peak = samples.find((sample) => sample.heapUsed === store.memoryPeak)!
+  const gaps = samples.slice(1).map((sample, i) => sample.time - samples[i]!.time)
+  let gapAt = -1
+  for (let i = 0; i < gaps.length; i++) if (gapAt < 0 || gaps[i]! > gaps[gapAt]!) gapAt = i
+  const sorted = gaps.toSorted((a, b) => a - b)
+  const mid = sorted.length >> 1
+  const median = sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2
+  const active = [...store.spans.values()].filter(
+    (span) => span.start <= peak.time && (span.end ?? Number.POSITIVE_INFINITY) >= peak.time,
+  )
+  const ids = new Set(active.map((span) => span.spanId))
+  const innermost = active
+    .filter((span) => !span.children.some((id) => ids.has(id)))
+    .map((span) => ref(analysis, span))
+    .sort((a, b) => a.startMs - b.startMs || (a.spanId < b.spanId ? -1 : 1))
+  return {
+    samples: samples.length,
+    peakHeapUsedBytes: store.memoryPeak,
+    peakHeapAtMs: ms(peak.time),
+    peakRssBytes: store.memoryRssPeak,
+    lastHeapUsedBytes: last.heapUsed,
+    firstSampleMs: ms(first.time),
+    lastSampleMs: ms(last.time),
+    medianIntervalMs: gaps.length === 0 ? null : ms(median),
+    maxGapMs: gapAt < 0 ? null : ms(gaps[gapAt]!),
+    maxGapFromMs: gapAt < 0 ? null : ms(samples[gapAt]!.time),
+    maxGapToMs: gapAt < 0 ? null : ms(samples[gapAt + 1]!.time),
+    spansActiveAtPeak: { total: innermost.length, items: innermost.slice(0, top) },
+  }
+}
+
+const processMemory = (analysis: Analysis, span: TraceSpan): ProcessMemory | null => {
+  const until = span.end ?? analysis.now
+  const inRange = analysis.store.memory.filter(
+    (sample) => sample.time >= span.start && sample.time <= until,
+  )
+  const first = inRange[0]
+  const last = inRange.at(-1)
+  if (first === undefined || last === undefined) return null
+  return {
+    samples: inRange.length,
+    firstSampleMs: ms(first.time),
+    lastSampleMs: ms(last.time),
+    firstHeapUsedBytes: first.heapUsed,
+    lastHeapUsedBytes: last.heapUsed,
+    maxHeapUsedBytes: Math.max(...inRange.map((sample) => sample.heapUsed)),
   }
 }
 
@@ -1189,6 +1271,7 @@ const detail = (
         }
       }),
     },
+    processMemory: processMemory(analysis, span),
   }
 }
 
@@ -1224,7 +1307,10 @@ const spanNotFound = (op: string, spanId: string, analysis: Analysis): QueryFail
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 /** Facts a reader of `summary` could otherwise miss, most important first. */
-const notices = (context: Context, unfinished: Summary['unfinished']): Array<Notice> => {
+const notices = (
+  context: Context,
+  { unfinished, memory }: Pick<Summary, 'unfinished' | 'memory'>,
+): Array<Notice> => {
   const out: Array<Notice> = []
   const { termination, completeness, time } = context
   if (unfinished.open > 0) {
@@ -1255,6 +1341,13 @@ const notices = (context: Context, unfinished: Summary['unfinished']): Array<Not
     out.push({
       code: 'collectorEvicted',
       message: `The collector evicted the oldest ${plural(evicted, 'message')} of this session at its capacity: data before observedFromMs (${time.observedFromMs} ms) is missing, so earlier spans, logs and memory samples are absent and retained spans may lack their start or parent.`,
+    })
+  }
+  // ponytail: fixed 10x threshold; the sampling interval is not in the protocol.
+  if (memory?.maxGapMs != null && memory.maxGapMs > 10 * memory.medianIntervalMs!) {
+    out.push({
+      code: 'memorySamplingGap',
+      message: `Memory samples are ${memory.medianIntervalMs} ms apart at the median, but no sample was retained for ${memory.maxGapMs} ms (from ${memory.maxGapFromMs} ms to ${memory.maxGapToMs} ms); process memory in that interval is unknown. The cause is not recorded. Possible explanations: synchronous work blocked the event loop so the sampling timer could not run, or the client's outbound queue was full and dropped samples (see completeness.clientDroppedMessages).`,
     })
   }
   return out
@@ -1345,7 +1438,7 @@ const answer = (source: TraceSource, request: SessionQuery): QueryResponse => {
         apiVersion,
         op: 'summary',
         query: { op, sessionId, top },
-        notices: notices(context, result.unfinished),
+        notices: notices(context, result),
         ...context,
         result,
       }

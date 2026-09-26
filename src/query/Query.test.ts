@@ -201,6 +201,55 @@ describe('Query timing', () => {
     expect(JSON.stringify(active.notices)).not.toContain('crash')
   })
 
+  it('places memory samples in time without attributing them to spans', () => {
+    const mem = (ms: number, heapUsed: number): Protocol.ClientMessage => ({
+      _tag: 'MemorySample',
+      sessionId: sid,
+      time: at(ms),
+      heapUsed,
+      heapTotal: 0,
+      rss: heapUsed,
+      external: 0,
+    })
+    // Samples every 10 ms, then a 500 ms gap; heap peaks at 30 inside 'leaf'.
+    const source = live([
+      start('root', 0),
+      start('leaf', 25, 'root'),
+      mem(0, 1),
+      mem(10, 2),
+      mem(20, 3),
+      mem(30, 9),
+      end('leaf', 35),
+      mem(40, 4),
+      mem(540, 5),
+    ])
+    const summary = ok(source, { op: 'summary' }) as Query.SummaryResponse
+    expect(summary.result.memory).toMatchObject({
+      peakHeapAtMs: 30,
+      medianIntervalMs: 10,
+      maxGapMs: 500,
+      maxGapFromMs: 40,
+      maxGapToMs: 540,
+      spansActiveAtPeak: { total: 1, items: [expect.objectContaining({ spanId: 'leaf' })] },
+    })
+    const gap = summary.notices.find((notice) => notice.code === 'memorySamplingGap')
+    expect(gap?.message).toContain('500 ms (from 40 ms to 540 ms)')
+    expect(JSON.stringify(summary)).not.toMatch(/allocat|leak|retained by/i)
+
+    const leaf = ok(source, { op: 'span', spanId: 'leaf' })
+    expect(leaf.op === 'span' && leaf.result.processMemory).toEqual({
+      samples: 1,
+      firstSampleMs: 30,
+      lastSampleMs: 30,
+      firstHeapUsedBytes: 9,
+      lastHeapUsedBytes: 9,
+      maxHeapUsedBytes: 9,
+    })
+    // Open: measured up to the last observation.
+    const root = ok(source, { op: 'span', spanId: 'root' })
+    expect(root.op === 'span' && root.result.processMemory?.samples).toBe(6)
+  })
+
   it('treats an open child of a closed span as covering it up to the parent end', () => {
     const source = live([start('p', 0), start('child', 20, 'p'), end('p', 50)])
     const response = ok(source, { op: 'span', spanId: 'p' })
