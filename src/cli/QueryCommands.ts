@@ -623,8 +623,10 @@ RESULT FIELDS
                    open child - the last recorded position on each open chain, not a
                    cause - largest elapsedLowerBoundMs first. Each is a SPAN ITEM plus
                    openAncestors: { items: [ { spanId, name, nameTruncated, status,
-                   startMs, durationMs } ], truncated }: contiguous open ancestors,
-                   root-most first, at most 32 nearest; truncated marks more above.
+                   startMs, durationMs, elapsedLowerBoundMs } ], truncated }:
+                   contiguous open ancestors, root-most first, at most 32 nearest;
+                   truncated marks more above. durationMs is null (no end);
+                   elapsedLowerBoundMs is observedUntilMs - startMs.
   longest          Completed spans only, largest durationMs first.
   largestOutsideChildren  Completed spans only, largest outsideChildrenMs first.
   longestOpen      Open spans, largest elapsedLowerBoundMs first.

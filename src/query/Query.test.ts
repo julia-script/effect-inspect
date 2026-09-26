@@ -196,8 +196,8 @@ describe('Query timing', () => {
     expect(unfinished.innermost.items.map((item) => item.spanId)).toEqual(['step'])
     expect(unfinished.innermost.items[0]!.openAncestors).toEqual({
       items: [
-        expect.objectContaining({ spanId: 'root', status: 'open' }),
-        expect.objectContaining({ spanId: 'work', status: 'open' }),
+        expect.objectContaining({ spanId: 'root', status: 'open', elapsedLowerBoundMs: 100 }),
+        expect.objectContaining({ spanId: 'work', status: 'open', elapsedLowerBoundMs: 90 }),
       ],
       truncated: false,
     })
@@ -207,7 +207,9 @@ describe('Query timing', () => {
       'collectorEvicted',
     ])
     expect(summary.notices[0]!.message).toContain('900 ms after the last retained message')
-    expect(summary.notices[0]!.message).toContain('"step"')
+    expect(summary.notices[0]!.message).toContain(
+      '"step" (spanId step), open for at least 80 ms, within "root" (spanId root), open for at least 100 ms',
+    )
 
     const active = ok(live(messages, { active: true, endedAtEpochMillis: undefined }), {
       op: 'summary',

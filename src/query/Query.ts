@@ -647,7 +647,8 @@ export interface NameGroup {
 export interface UnfinishedSpan extends SpanItem {
   /** Contiguous open ancestors, root-most first, ending at the direct parent. */
   readonly openAncestors: {
-    readonly items: ReadonlyArray<SpanRef>
+    /** `elapsedLowerBoundMs`: `observedUntilMs - startMs`, as on open span items. */
+    readonly items: ReadonlyArray<SpanRef & { readonly elapsedLowerBoundMs: number }>
     /** More open ancestors exist above the first item. */
     readonly truncated: boolean
   }
@@ -1080,6 +1081,18 @@ const ancestry = (analysis: Analysis, span: TraceSpan, openOnly: boolean) => {
   return { items: items.reverse(), truncated }
 }
 
+const openAncestors = (analysis: Analysis, span: TraceSpan): UnfinishedSpan['openAncestors'] => {
+  const { items, truncated } = ancestry(analysis, span, true)
+  return {
+    items: items.map((item) => ({
+      ...item,
+      elapsedLowerBoundMs: analysis.item(analysis.store.spans.get(item.spanId)!)
+        .elapsedLowerBoundMs!,
+    })),
+    truncated,
+  }
+}
+
 const summarize = (analysis: Analysis, top: number): Summary => {
   const items = [...analysis.store.spans.values()].map((span) => analysis.item(span))
   const counts = { total: items.length, ok: 0, error: 0, defect: 0, interrupted: 0, open: 0 }
@@ -1134,7 +1147,7 @@ const summarize = (analysis: Analysis, top: number): Summary => {
         total: innermost.length,
         items: innermost.slice(0, top).map((item) => ({
           ...item,
-          openAncestors: ancestry(analysis, store.spans.get(item.spanId)!, true),
+          openAncestors: openAncestors(analysis, store.spans.get(item.spanId)!),
         })),
       },
     },
@@ -1316,10 +1329,15 @@ const notices = (
   if (unfinished.open > 0) {
     const spans = plural(unfinished.open, 'span')
     const first = unfinished.innermost.items[0]
+    const outer = first?.openAncestors.items[0]
+    const within =
+      outer === undefined
+        ? ''
+        : `, within "${outer.name}" (spanId ${outer.spanId}), open for at least ${outer.elapsedLowerBoundMs} ms`
     const position =
       first === undefined
         ? ''
-        : ` Last recorded position: "${first.name}" (spanId ${first.spanId}), open for at least ${first.elapsedLowerBoundMs} ms, innermost of ${plural(unfinished.innermost.total, 'open chain')}; see result.unfinished.`
+        : ` Last recorded position: "${first.name}" (spanId ${first.spanId}), open for at least ${first.elapsedLowerBoundMs} ms${within}, innermost of ${plural(unfinished.innermost.total, 'open chain')}; see result.unfinished.`
     let message: string
     if (termination.state === 'active') {
       message = `${spans} had no recorded end at snapshot time and the program is still connected; they may still end.${position}`
