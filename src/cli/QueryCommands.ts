@@ -327,6 +327,12 @@ COLLECTOR ADDRESS (live only)
 
 const context = `
 CONTEXT FIELDS (every successful per-session response)
+  Top-level siblings of result, never inside it (.completeness, not
+  .result.completeness). result's own fields are listed above (RESULT FIELDS /
+  SPAN ITEM FIELDS); root \`effect-inspect --help\` has the JSON SHAPE overview.
+  notices        summary only, top level: read it first. { code, message } facts easy
+                 to miss (open spans, eviction, sampling gaps); run \`summary\` before
+                 drilling down with other commands.
   query          The request as applied, defaults filled in. Check it to confirm
                  which filters were used.
   source         kind "live"|"file", file (path or null), sessionId (exact), program,
@@ -340,6 +346,15 @@ CONTEXT FIELDS (every successful per-session response)
                  microsecond resolution. Wall clock = startedAtEpochMillis + ms. Values
                  can be negative (work that began before the client). observedFromMs /
                  observedUntilMs: earliest / latest retained timestamp, null when none.
+  termination    state "active" (still connected at snapshot time; open spans may still
+                 end), "ended" (the collector recorded a disconnect) or "unknown" (no
+                 end time on record). lastObservedMs (= observedUntilMs), endedAtMs
+                 (the disconnect in session ms, from the collector's wall clock, so
+                 approximate; null unless ended), unobservedTailMs (endedAtMs -
+                 lastObservedMs: time before the disconnect with nothing retained).
+                 The protocol has no end-of-session message: a crash, a kill, a clean
+                 exit and a dropped connection look the same, so open spans at the end
+                 do not by themselves establish a crash.
   completeness   status: "noLossRecorded" (collector counters known, all loss/gap
                  counters 0 - still not proof nothing is missing), "lossRecorded" (some
                  counter > 0: evidence is partial), or "unknown" (source never kept
@@ -560,7 +575,8 @@ const summaryCommand = Command.make(
   ),
   Command.withDescription(
     text(`
-Overview of one session: span counts by status, failures, the longest spans, the spans
+Overview of one session: notices, span counts by status, failures, unfinished spans
+and where they were last recorded, the longest completed spans, the spans
 with the most time outside recorded children, still-open spans, per-name totals, log
 counts by level and memory samples, plus how complete the evidence is. Start every
 investigation here, then drill down with \`spans\`, \`span\` and \`logs\`.
@@ -569,9 +585,12 @@ ${sourceRules}
 RESULT (abbreviated; lists hold at most --top items)
   { "ok": true, "apiVersion": 1, "op": "summary",
     "query": { "op": "summary", "sessionId": "failing-run-001", "top": 5 },
+    "notices": [],
     "source": { "kind": "live", "sessionId": "failing-run-001", "active": false, ... },
     "time": { "unit": "ms", "reference": "sessionStart",
               "observedFromMs": -1.348, "observedUntilMs": 240.867 },
+    "termination": { "state": "ended", "lastObservedMs": 240.867, "endedAtMs": 243,
+                     "unobservedTailMs": 2.133 },
     "completeness": { "status": "noLossRecorded", "openSpans": 0, ... },
     "conflict": { "count": 0, "detection": "enforced" },
     "result": {
@@ -581,6 +600,7 @@ RESULT (abbreviated; lists hold at most --top items)
       "memory": { "samples": 2, "peakHeapUsedBytes": 7158493, "peakRssBytes": 61489152,
                   "lastHeapUsedBytes": 7158493 },
       "failures": { "total": 4, "items": [ SPAN ITEM, ... ] },
+      "unfinished": { "open": 0, "innermost": { "total": 0, "items": [] } },
       "longest": [ SPAN ITEM, ... ],
       "largestOutsideChildren": [ SPAN ITEM, ... ],
       "longestOpen": [ SPAN ITEM, ... ],
@@ -589,17 +609,41 @@ RESULT (abbreviated; lists hold at most --top items)
         "maxDurationMs": 241.993, "totalOutsideChildrenMs": 0.658 }, ... ] } } }
 
 RESULT FIELDS
+  notices          Top level, before result: { code, message } facts easy to miss.
+                   openSpans (spans without a recorded end, the termination state
+                   and the last recorded position), rankingsCompletedOnly (longest and
+                   largestOutsideChildren skip open spans), collectorEvicted (oldest
+                   messages evicted at capacity: data before observedFromMs is
+                   missing), memorySamplingGap (the largest gap between memory
+                   samples exceeds 10x the median). Messages state facts;
+                   explanations are possibilities.
   spans            Counts by status. failures lists error and defect spans (not
                    interruptions), earliest start first; failures.total counts all.
-  longest          Completed spans, largest durationMs first.
-  largestOutsideChildren  Completed spans, largest outsideChildrenMs first.
+  unfinished       open: spans without a recorded end. innermost: open spans with no
+                   open child - the last recorded position on each open chain, not a
+                   cause - largest elapsedLowerBoundMs first. Each is a SPAN ITEM plus
+                   openAncestors: { items: [ { spanId, name, nameTruncated, status,
+                   startMs, durationMs, elapsedLowerBoundMs } ], truncated }:
+                   contiguous open ancestors, root-most first, at most 32 nearest;
+                   truncated marks more above. durationMs is null (no end);
+                   elapsedLowerBoundMs is observedUntilMs - startMs.
+  longest          Completed spans only, largest durationMs first.
+  largestOutsideChildren  Completed spans only, largest outsideChildrenMs first.
   longestOpen      Open spans, largest elapsedLowerBoundMs first.
   names            Groups by full span name, largest totalDurationMs first. Sums cover
                    completed spans; nested and concurrent spans overlap, so totals can
                    exceed the run's wall time. failed counts every failure incl.
                    interruptions.
-  logs.byLevel     Only levels that occur. memory: { samples, peakHeapUsedBytes,
-                   peakRssBytes, lastHeapUsedBytes } or null without samples.
+  logs.byLevel     Only levels that occur.
+  memory           Process-wide samples (all work in the process), or null without
+                   samples: { samples, peakHeapUsedBytes, peakHeapAtMs, peakRssBytes,
+                   lastHeapUsedBytes, firstSampleMs, lastSampleMs, medianIntervalMs,
+                   maxGapMs, maxGapFromMs, maxGapToMs, spansActiveAtPeak }. Periodic
+                   samples miss peaks between them; maxGapMs is the longest stretch
+                   with no sample. spansActiveAtPeak: { total, items: [ { spanId,
+                   name, nameTruncated, status, startMs, durationMs } ] }, the
+                   innermost spans active at peakHeapAtMs - active at that time only,
+                   not shown to be what the heap in use belongs to.
 ${spanItem}
 ${context}
 ${timing}
@@ -695,9 +739,12 @@ FILTERS (all combine with AND)
 
 ORDER (--sort)
   start            startMs ascending (default).
-  duration         durationMs descending; open spans after completed ones, by
-                   elapsedLowerBoundMs descending.
-  outsideChildren  outsideChildrenMs descending; open spans last, as above.
+  duration         durationMs descending. Open spans are interleaved by
+                   elapsedLowerBoundMs: their true duration is at least that.
+  outsideChildren  outsideChildrenMs descending. Open spans are interleaved by the
+                   time so far no recorded child covered (open children count as
+                   covering up to observedUntilMs): a lower bound, not shown in the
+                   item (their outsideChildrenMs is null).
   Ties: startMs, then spanId.
 ${pagingRules(Query.limits.spans.max, Query.limits.spans.default, 'as --sort')}
 
@@ -705,7 +752,8 @@ RESULT (abbreviated)
   { "ok": true, "apiVersion": 1, "op": "spans",
     "query": { "op": "spans", "sessionId": "failing-run-001", "status": "failed",
                "sort": "start", "limit": 20, "offset": 0 },
-    "source": { ... }, "time": { ... }, "completeness": { ... }, "conflict": { ... },
+    "source": { ... }, "time": { ... }, "termination": { ... },
+    "completeness": { ... }, "conflict": { ... },
     "window": null,
     "result": { "total": 5, "offset": 0, "limit": 20, "nextOffset": null, "items": [
       { "spanId": "0a40c31fbf88b7db", "traceId": "9d502fd678d8f15c0328b182dc1e3509",
@@ -733,7 +781,7 @@ ${exitTable(sessionErrors)}
       command:
         'effect-inspect spans --session failing-run-001 --sort outsideChildren --limit 5 --json',
       description:
-        'Five spans ranked by elapsed time outside recorded children (completed first; open spans follow by elapsedLowerBoundMs)',
+        'Five spans ranked by elapsed time outside recorded children (open spans by a lower bound)',
     },
     {
       command:
@@ -795,7 +843,8 @@ RESULT (abbreviated): a SPAN ITEM plus the fields below
   { "ok": true, "apiVersion": 1, "op": "span",
     "query": { "op": "span", "sessionId": "failing-run-001",
                "spanId": "0a40c31fbf88b7db", "children": 20, "events": 20 },
-    "source": { ... }, "time": { ... }, "completeness": { ... }, "conflict": { ... },
+    "source": { ... }, "time": { ... }, "termination": { ... },
+    "completeness": { ... }, "conflict": { ... },
     "result": { "spanId": "0a40c31fbf88b7db", "name": "charge.card", "status": "error",
       ...other SPAN ITEM fields...,
       "attributes": { "entries": [], "omittedKeys": 0 },
@@ -832,6 +881,11 @@ RESULT FIELDS
                  { name, nameTruncated, timeMs, attributes }. Effect logs emitted inside
                  the span are also recorded as its events (as above); use \`logs --span\`
                  for their level and message.
+  processMemory  Process-wide memory samples within the span's interval (open: up to
+                 observedUntilMs): { samples, firstSampleMs, lastSampleMs,
+                 firstHeapUsedBytes, lastHeapUsedBytes, maxHeapUsedBytes }, or null
+                 when no sample falls in range. Includes all concurrent work in the
+                 process; not what this span itself used or kept.
 ${spanItem}
 ${context}
 ${timing}
@@ -921,7 +975,8 @@ RESULT (abbreviated)
   { "ok": true, "apiVersion": 1, "op": "logs",
     "query": { "op": "logs", "sessionId": "failing-run-001",
                "spanId": "0a40c31fbf88b7db", "scope": "subtree", "limit": 50, "offset": 0 },
-    "source": { ... }, "time": { ... }, "completeness": { ... }, "conflict": { ... },
+    "source": { ... }, "time": { ... }, "termination": { ... },
+    "completeness": { ... }, "conflict": { ... },
     "window": null,
     "result": { "total": 1, "offset": 0, "limit": 50, "nextOffset": null, "items": [
       { "timeMs": -0.506, "level": "Info", "message": "charging card **** 4242",

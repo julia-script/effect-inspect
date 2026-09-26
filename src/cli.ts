@@ -126,6 +126,21 @@ OUTPUT AND EXIT CODES (all query commands)
   8 CollectorUnavailable    9 CollectorError          10 OutputError (export)
   Each command's --help explains its errors and what to do next.
 
+JSON SHAPE (success, per-session queries)
+  Top-level keys: ok, apiVersion, op, query, notices (summary only), source, time,
+  termination, completeness, conflict, result (spans and logs add window).
+  Context keys are siblings of result, never inside it: .completeness, not
+  .result.completeness. Most-used paths:
+  .notices[]                  summary: read first; { code, message } facts easy to miss
+  .result.spans.open          summary: span counts by status (also total, ok, error, ...)
+  .result.unfinished          summary: innermost open spans and their open ancestors
+  .result.longest[].durationMs  summary: completed spans only, longest first
+  .result.memory              summary: heap peak, sampling gaps; null without samples
+  .result.items[]             spans and logs: the page (with total, nextOffset)
+  .completeness.status        noLossRecorded | lossRecorded | unknown
+  .termination.state          active | ended | unknown
+  Full field lists: \`<command> --help\` (RESULT FIELDS or SPAN ITEM FIELDS, CONTEXT FIELDS).
+
 EVIDENCE AND TIMING
   Times are milliseconds since the session's clock origin (when its inspect client
   started) and can be negative. durationMs is elapsed wall time; outsideChildrenMs is
