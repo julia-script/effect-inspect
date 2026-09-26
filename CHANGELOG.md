@@ -1,5 +1,16 @@
 # effect-inspect
 
+## 0.3.0
+
+### Minor Changes
+
+- c5efb18: `summary.result.memory` places process-wide memory in time: `peakHeapAtMs`, first/last sample times, sampling cadence (`medianIntervalMs`, `maxGapMs` with `maxGapFromMs`/`maxGapToMs`) and `spansActiveAtPeak`, the innermost spans active when the heap peaked. A `memorySamplingGap` notice reports a gap between samples over 10× the median, with possible causes phrased as possibilities. `span` gains `processMemory`: the process-wide samples within the span's interval. Additive; `apiVersion` stays 1.
+- 3904603: `summary` now leads with what an interrupted or disconnected run left unfinished. A top-level `notices` array states easy-to-miss facts (spans without a recorded end, how the session ended, that `longest` ranks completed spans only, collector eviction). `result.unfinished` lists the innermost open spans — the last recorded position on each open chain — with their open ancestors, before `longest`. Every per-session response gains `termination` (`state` active/ended/unknown, `lastObservedMs`, `endedAtMs`, `unobservedTailMs`). `spans --sort duration|outsideChildren` interleaves open spans by a lower bound instead of listing them last. Additive; `apiVersion` stays 1.
+
+### Patch Changes
+
+- ff10e18: Root `--help` gains a JSON SHAPE section: the top-level keys of a query response, a reminder that context keys (`completeness`, `termination`, ...) are siblings of `result`, and the most-used key paths. Each per-session command's help points to its field lists and says to read `summary`'s `notices` first.
+
 ## 0.2.0
 
 ### Minor Changes
