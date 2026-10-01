@@ -11,7 +11,7 @@
  * own convention: `Inspect.layer()` itself only uses its `url` option.
  */
 import { Config, Effect } from 'effect'
-import { FetchHttpClient, HttpClient } from 'effect/unstable/http'
+import { FetchHttpClient, HttpClient } from 'effect/http'
 import * as BunRuntime from '@effect/platform-bun/BunRuntime'
 import * as Inspect from '../src/client/Inspect.ts'
 

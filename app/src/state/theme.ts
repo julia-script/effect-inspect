@@ -16,7 +16,7 @@
  * only ever be the default — and correcting it in an effect is a flash. See
  * {@link THEME_BOOT_SCRIPT}, which runs before first paint.
  */
-import { Atom } from 'effect/unstable/reactivity'
+import { Atom } from 'effect/reactivity'
 
 /** What the user chose. `system` defers to `prefers-color-scheme`. */
 export type Theme = 'light' | 'dark' | 'system'

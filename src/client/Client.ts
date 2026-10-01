@@ -25,8 +25,8 @@
  * place.
  */
 import { Context, Duration, Effect, Latch, Queue, Result, Schedule, type Scope } from 'effect'
-import type { Socket } from 'effect/unstable/socket'
-import { Socket as SocketService } from 'effect/unstable/socket'
+import type { Socket } from 'effect/socket'
+import { Socket as SocketService } from 'effect/socket'
 import { clientCodec } from '../protocol/Codec.ts'
 import * as Protocol from '../protocol/Schema.ts'
 

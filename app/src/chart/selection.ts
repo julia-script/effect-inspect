@@ -9,7 +9,7 @@
  * re-depthed by a late-arriving parent, so holding a reference would pin a
  * stale depth. Both views resolve the id against `traceStore` at read time.
  */
-import { Atom } from 'effect/unstable/reactivity'
+import { Atom } from 'effect/reactivity'
 
 /** The clicked span, or `undefined`. Drives the detail panel and both views' highlight. */
 export const selectedSpanIdAtom = Atom.make<string | undefined>(undefined)

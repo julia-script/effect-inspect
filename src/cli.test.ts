@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 // oxlint-disable-next-line effecttsgo/node-builtin-import
 import { join } from 'node:path'
 import { Effect, type Scope } from 'effect'
-import { FetchHttpClient, HttpClient, HttpClientRequest, HttpServer } from 'effect/unstable/http'
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpServer } from 'effect/http'
 import * as Inspect from './client/Inspect.ts'
 import { run as serve } from './collector/Server.ts'
 import { make as makeStore, Store } from './collector/Store.ts'

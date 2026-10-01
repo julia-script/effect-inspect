@@ -9,7 +9,7 @@ import * as NodeHttpServer from '@effect/platform-node/NodeHttpServer'
 // Exercise the same native server constructor used by the installed CLI.
 // oxlint-disable-next-line effecttsgo/node-builtin-import
 import { createServer } from 'node:http'
-import { FetchHttpClient, type HttpClient, HttpServer } from 'effect/unstable/http'
+import { FetchHttpClient, type HttpClient, HttpServer } from 'effect/http'
 import * as Inspect from '../client/Inspect.ts'
 import * as Client from '../query/Client.ts'
 import * as Query from '../query/Query.ts'

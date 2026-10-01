@@ -7,7 +7,7 @@
  * prints one JSON contract whatever went wrong.
  */
 import { Duration, Effect } from 'effect'
-import { HttpClient, HttpClientRequest } from 'effect/unstable/http'
+import { HttpClient, HttpClientRequest } from 'effect/http'
 import { defaultPort } from '../collector/Config.ts'
 import * as Query from './Query.ts'
 
