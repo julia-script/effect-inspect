@@ -52,8 +52,8 @@
   "dependencies": {
     "@effect/atom-react": "4.0.0",
     "@effect/platform-node": "4.0.0",
-    "@tanstack/react-router": "^1.170.39",
-    "@tanstack/react-start": "^1.168.58",
+    "@tanstack/react-router": "^1.170.41",
+    "@tanstack/react-start": "^1.168.60",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "effect": "4.0.0",
