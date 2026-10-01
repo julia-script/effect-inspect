@@ -12,7 +12,7 @@ import * as NodeHttpServer from '@effect/platform-node/NodeHttpServer'
 // Exercise the same native server constructor used by the installed CLI.
 // oxlint-disable-next-line effecttsgo/node-builtin-import
 import { createServer } from 'node:http'
-import { HttpServer } from 'effect/unstable/http'
+import { HttpServer } from 'effect/http'
 import { clientCodec, webappCodec, webappRequestCodec } from '../protocol/Codec.ts'
 import type * as Protocol from '../protocol/Schema.ts'
 import { protocolVersion } from '../protocol/Schema.ts'

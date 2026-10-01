@@ -18,7 +18,7 @@
  * `completeness.messagesObserved` to tell whether data changed between pages.
  */
 import { Clock, Effect, Result } from 'effect'
-import { HttpServerRequest, HttpServerResponse } from 'effect/unstable/http'
+import { HttpServerRequest, HttpServerResponse } from 'effect/http'
 import * as Query from '../query/Query.ts'
 import { Store } from './Store.ts'
 

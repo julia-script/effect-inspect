@@ -6,7 +6,7 @@
 // oxlint-disable typescript/no-floating-promises
 import { describe, expect, it } from 'bun:test'
 import { Effect, Layer, Result } from 'effect'
-import { Socket } from 'effect/unstable/socket'
+import { Socket } from 'effect/socket'
 import { clientCodec } from '../protocol/Codec.ts'
 import type { ClientMessage, SessionId, SpanEnd, SpanStart } from '../protocol/Schema.ts'
 import * as Client from './Client.ts'

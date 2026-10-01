@@ -8,8 +8,8 @@
  * take the collector down.
  */
 import { Effect, Fiber, PubSub, Result } from 'effect'
-import { HttpServer, HttpServerRequest, HttpServerResponse } from 'effect/unstable/http'
-import { Socket } from 'effect/unstable/socket'
+import { HttpServer, HttpServerRequest, HttpServerResponse } from 'effect/http'
+import { Socket } from 'effect/socket'
 import { clientCodec, collectorCodec, webappCodec, webappRequestCodec } from '../protocol/Codec.ts'
 import type * as Protocol from '../protocol/Schema.ts'
 import * as QueryApi from './QueryApi.ts'

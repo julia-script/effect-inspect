@@ -14,7 +14,7 @@
  * See `usePanel` in {@link module:components/Panel} for the read side, which
  * defers to the server's value until hydration commits.
  */
-import { Atom } from 'effect/unstable/reactivity'
+import { Atom } from 'effect/reactivity'
 
 /** `localStorage` key. One record, so a panel added later costs no migration. */
 export const PANELS_STORAGE_KEY = 'effect-inspect:panels'

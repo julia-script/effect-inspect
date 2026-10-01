@@ -13,7 +13,7 @@
  * waiting on a connection. See `Client.ts` for how that is kept true.
  */
 import { Layer, Logger, Tracer } from 'effect'
-import { Socket } from 'effect/unstable/socket'
+import { Socket } from 'effect/socket'
 
 import * as Client from './Client.ts'
 import * as ClientTracer from './Tracer.ts'

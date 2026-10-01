@@ -14,7 +14,7 @@
  * never touches React.
  */
 import { Result } from 'effect'
-import { Atom } from 'effect/unstable/reactivity'
+import { Atom } from 'effect/reactivity'
 import { webappCodec, webappRequestCodec } from '../../../src/protocol/Codec.ts'
 import type { ClientMessage, Session, WebappMessage } from '../../../src/protocol/Schema.ts'
 import { isLoadedSession, loadedSession, parseTraceFile } from '../trace/TraceFile.ts'

@@ -10,7 +10,7 @@
  * React's only involvement is mounting this and passing the registry; the
  * component tree does not re-render when the chart redraws.
  */
-import type { AtomRegistry } from 'effect/unstable/reactivity/AtomRegistry'
+import type { AtomRegistry } from 'effect/reactivity/AtomRegistry'
 import type { TraceSpan } from '../trace/TraceStore.ts'
 import { traceStore } from '../state/atoms.ts'
 import { emptyLayout, forEachVisible, type Layout, layout, spanEnd } from './Layout.ts'
