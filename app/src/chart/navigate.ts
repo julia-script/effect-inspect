@@ -100,7 +100,7 @@ export const firstSpan = (store: TraceStore): string | undefined =>
  *
  * `isContentEditable` covers rich-text hosts; `closest` catches a keystroke
  * that lands on a child of one. Lives here rather than beside the handler so a
- * plain `bun test` can exercise it without mounting React.
+ * plain `bun test` can exercise it without mounting a browser view.
  */
 export const isTypingTarget = (target: EventTarget | null): boolean => {
   if (!(target instanceof HTMLElement)) return false

@@ -3,6 +3,8 @@
 A performance inspector for Effect programs. Add one layer to your app, open
 localhost, and watch a live flame chart of its spans, events and logs.
 
+![Effect inspector demo showing a live flame chart, virtualized event log, and selected span details](docs/images/inspector-demo.png)
+
 Your program dials out to a long-lived **collector**, and the **webapp** reads
 the trace back from it. The collector owns the history, so
 restarting your program does not lose the trace.
@@ -181,6 +183,23 @@ library's `Inspect.layer()` uses the runtime's global `WebSocket`; use
 that global is unavailable.
 
 ## Development
+
+The frontend uses [Foldkit](https://foldkit.dev/) with Effect 4 and Vite.
+`app/src/main.ts` defines initialization and the pure Message/update state machine;
+`app/src/state/model.ts` defines the Schema-backed UI Model. Browser actions live
+in Commands, the collector connection in a scoped Subscription, and the canvas,
+observers and pointer listeners in scoped Mounts.
+
+Dense span data stays in `TraceStore`, outside the UI Model. The socket applies
+messages directly and publishes a sampled version once per animation frame.
+The event log is virtualized, and aggregation follows the chart's sampled time
+window. DevTools uses Inspect mode because the mutable trace resource does not
+support historical replay. Development reloads preserve UI preferences; loaded
+file data ends with the previous browser resource lifetime and must be reopened.
+
+Vite proxies `/webapp` to the local collector on port 34437. Set
+`VITE_COLLECTOR_URL` to inspect another collector. Production builds are static
+assets in `app/dist`, served by the installed CLI alongside the WebSocket API.
 
 ```bash
 bun run check         # format, lint, typecheck — must pass before a commit
