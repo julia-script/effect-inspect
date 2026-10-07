@@ -1,29 +1,10 @@
-/**
- * The flame chart's canvas renderer.
- *
- * Owns the whole per-frame data path: it reads {@link traceStore} and the
- * selection atoms directly and never goes through React. A frame is
- * unconditionally cheap — it draws only the spans intersecting the viewport,
- * found by binary search into a {@link Layout} that is rebuilt only when spans
- * actually arrive. Panning a 10k-span trace touches a few hundred spans.
- *
- * React's only involvement is mounting this and passing the registry; the
- * component tree does not re-render when the chart redraws.
- */
-import type { AtomRegistry } from 'effect/reactivity/AtomRegistry'
+/** Canvas renderer. Foldkit mounts it and supplies a snapshot of the UI selection. */
+import type { Selection } from '../state/model.ts'
 import type { TraceSpan } from '../trace/TraceStore.ts'
-import { traceStore } from '../state/atoms.ts'
+import { traceStore } from '../state/trace.ts'
 import { emptyLayout, forEachVisible, type Layout, layout, spanEnd } from './Layout.ts'
-import {
-  filterAtom,
-  filterHidesAtom,
-  hoveredSpanIdAtom,
-  matches,
-  memoryCollapsedAtom,
-  selectedSpanIdAtom,
-} from './selection.ts'
+import { matches } from './selection.ts'
 import { type Palette, readPalette } from './palette.ts'
-import { resolvedThemeAtom } from '../state/theme.ts'
 import { clamp, isFull, pan, type Viewport, zoom } from './Viewport.ts'
 import {
   drawMemoryTrack,
@@ -80,12 +61,14 @@ export class FlameRenderer {
   private drag: { readonly x: number; readonly view: Viewport } | undefined
   private overviewDrag = false
   private overviewGrab = 0
-  private readonly unsubscribes: Array<() => void> = []
   private readonly observer: ResizeObserver
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
-    private readonly registry: AtomRegistry,
+    private selection: Selection,
+    private readonly onSelect: (spanId: string | undefined) => void,
+    private readonly onHover: (spanId: string | undefined) => void,
+    private readonly onToggleMemory: () => void,
   ) {
     const ctx = canvas.getContext('2d', { alpha: false })
     if (ctx === null) throw new Error('2d canvas context unavailable')
@@ -101,31 +84,19 @@ export class FlameRenderer {
     canvas.addEventListener('pointerleave', this.onPointerLeave)
     canvas.addEventListener('wheel', this.onWheel, { passive: false })
 
-    // A selection or filter change repaints but does not rebuild layout.
-    const repaint = (): void => this.invalidate()
-    this.unsubscribes.push(
-      registry.subscribe(selectedSpanIdAtom, repaint),
-      registry.subscribe(hoveredSpanIdAtom, repaint),
-      registry.subscribe(filterAtom, repaint),
-      registry.subscribe(filterHidesAtom, repaint),
-      registry.subscribe(memoryCollapsedAtom, repaint),
-      // Theme changes arrive on the same path as a selection change: re-read
-      // the tokens, mark dirty, let the existing loop repaint. The chart never
-      // learns about themes from React, so a flip costs one style resolution
-      // and one frame.
-      registry.subscribe(resolvedThemeAtom, () => {
-        this.palette = readPalette()
-        this.invalidate()
-      }),
-    )
-
     this.loop()
+  }
+
+  /** Apply the latest Model snapshot without rebuilding the span layout. */
+  updateSelection(selection: Selection): void {
+    if (selection.resolvedTheme !== this.selection.resolvedTheme) this.palette = readPalette()
+    this.selection = selection
+    this.invalidate()
   }
 
   dispose(): void {
     if (this.frame !== undefined) cancelAnimationFrame(this.frame)
     this.observer.disconnect()
-    for (const off of this.unsubscribes) off()
     this.canvas.removeEventListener('pointerdown', this.onPointerDown)
     this.canvas.removeEventListener('pointermove', this.onPointerMove)
     this.canvas.removeEventListener('pointerup', this.onPointerUp)
@@ -200,7 +171,7 @@ export class FlameRenderer {
    */
   private keyboardAnchor(): number {
     if (this.cursorX !== undefined) return this.xToTime(this.cursorX)
-    const selected = this.registry.get(selectedSpanIdAtom)
+    const selected = this.selection.selectedSpanId
     const span = selected === undefined ? undefined : traceStore.spans.get(selected)
     if (span !== undefined) return (span.start + spanEnd(span, this.total())) / 2
     return (this.view.from + this.view.to) / 2
@@ -226,7 +197,7 @@ export class FlameRenderer {
    * without `process.memoryUsage` gets no empty band — and zero when collapsed.
    */
   private memoryHeight(): number {
-    return trackHeight(traceStore.memory, this.registry.get(memoryCollapsedAtom))
+    return trackHeight(traceStore.memory, this.selection.memoryCollapsed)
   }
 
   /**
@@ -360,7 +331,7 @@ export class FlameRenderer {
     }
 
     // The track's label is its own collapse toggle: the track is canvas, so a
-    // DOM control for it would mean the chart's React tree owning a piece of
+    // DOM control for it would mean the chart view owning a piece of
     // chart chrome it otherwise knows nothing about.
     const memoryHeight = this.memoryHeight()
     const memoryTop = OVERVIEW_HEIGHT + RULER_HEIGHT
@@ -370,13 +341,13 @@ export class FlameRenderer {
       y < memoryTop + memoryHeight &&
       x < MEMORY_LABEL_WIDTH
     ) {
-      this.registry.set(memoryCollapsedAtom, !this.registry.get(memoryCollapsedAtom))
+      this.onToggleMemory()
       this.invalidate()
       return
     }
 
     const hit = this.hitTest(x, y)
-    this.registry.set(selectedSpanIdAtom, hit?.span.spanId)
+    this.onSelect(hit?.span.spanId)
     this.drag = { x, view: this.view }
   }
 
@@ -399,10 +370,11 @@ export class FlameRenderer {
     }
 
     const hit = this.hitTest(x, y)
-    if (hit?.span.spanId !== this.hover?.span.spanId) {
-      this.registry.set(hoveredSpanIdAtom, hit?.span.spanId)
-    }
+    const previous = this.hover
     this.hover = hit
+    if (hit?.span.spanId !== previous?.span.spanId) {
+      this.onHover(hit?.span.spanId)
+    }
     this.canvas.style.cursor = hit === undefined ? 'default' : 'pointer'
     this.invalidate()
   }
@@ -416,7 +388,7 @@ export class FlameRenderer {
   private onPointerLeave = (): void => {
     this.hover = undefined
     this.cursorX = undefined
-    this.registry.set(hoveredSpanIdAtom, undefined)
+    this.onHover(undefined)
     this.invalidate()
   }
 
@@ -469,9 +441,9 @@ export class FlameRenderer {
     ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace'
     ctx.textBaseline = 'middle'
 
-    const filter = this.registry.get(filterAtom).toLowerCase()
-    const hides = this.registry.get(filterHidesAtom)
-    const selected = this.registry.get(selectedSpanIdAtom)
+    const filter = this.selection.filter.toLowerCase()
+    const hides = this.selection.filterHides
+    const selected = this.selection.selectedSpanId
 
     this.drawOverview(filter)
     const ticks = this.drawRuler()
@@ -554,7 +526,7 @@ export class FlameRenderer {
     // with no second piece of pointer state to keep in sync.
     const cursorTime = this.cursorX === undefined ? undefined : this.xToTime(this.cursorX)
 
-    const collapsed = this.registry.get(memoryCollapsedAtom)
+    const collapsed = this.selection.memoryCollapsed
     drawMemoryTrack({
       ctx: this.ctx,
       samples: traceStore.memory,
@@ -573,7 +545,7 @@ export class FlameRenderer {
 
     // Readout at the cursor: the value at that instant, drawn on the canvas
     // rather than in the DOM tooltip, so the track owns its whole surface and
-    // does not need the flame chart's React tree to know it exists.
+    // does not need the flame chart view to know it exists.
     if (collapsed || cursorTime === undefined) return
     const sample = sampleAt(traceStore.memory, cursorTime)
     if (sample === undefined) return

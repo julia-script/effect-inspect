@@ -1,13 +1,9 @@
 /**
  * The in-memory trace model for one session.
  *
- * This is deliberately **not** React state and **not** an atom. A dense trace
- * is 10k+ spans and the flame chart redraws on every pan/zoom frame; putting a
- * span in React state would cost a reconciliation per span, and putting one in
- * an atom would cost a subscription per span. Instead the store is a plain
- * mutable structure that the canvas renderer reads directly during its draw
- * call, and React only ever learns that *something* changed — via
- * {@link TraceStore.version} — never what.
+ * Dense traces contain 10k+ spans, so this resource stays outside the Foldkit
+ * UI Model. The canvas reads its mutable data directly during draw calls;
+ * the DOM views receive only a sampled version change, at most once per frame.
  *
  * The shapes here are tuned for the renderer's access pattern: it walks spans
  * in depth-then-start order once per frame, so `rows` is maintained
@@ -190,9 +186,9 @@ export class TraceStore {
   /**
    * Bumped on every mutation.
    *
-   * This is the *only* value React is allowed to observe. The renderer polls
-   * it per frame to decide whether to redraw; the UI mirrors it into an atom
-   * on a timer so counters update without a render per span.
+   * The renderer polls this per frame to decide whether to redraw; the Foldkit
+   * UI Model receives a sampled copy on an animation frame so counters update
+   * without a render per span.
    */
   version = 0
 

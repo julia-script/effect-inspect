@@ -1,6 +1,5 @@
+import { foldkit } from '@foldkit/vite-plugin'
 import tailwindcss from '@tailwindcss/vite'
-import { tanstackStart } from '@tanstack/react-start/plugin/vite'
-import viteReact from '@vitejs/plugin-react'
 // Vite config runs synchronously in plain Node, outside any Effect runtime.
 // oxlint-disable-next-line effecttsgo/node-builtin-import
 import { execFileSync } from 'node:child_process'
@@ -55,6 +54,10 @@ export default defineConfig({
   },
   // Next to the collector's 34437; strict so a busy port fails loudly instead
   // of silently moving to another one.
-  server: { port: 34438, strictPort: true },
-  plugins: [tailwindcss(), tanstackStart(), viteReact(), exitWithLauncher()],
+  server: {
+    port: 34438,
+    strictPort: true,
+    proxy: { '/webapp': { target: 'ws://localhost:34437', ws: true } },
+  },
+  plugins: [...foldkit(), tailwindcss(), exitWithLauncher()],
 })
