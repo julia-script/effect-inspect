@@ -1,51 +1,28 @@
 # effect-inspect
 
-A performance inspector for Effect programs. Add one layer to your app, open
-localhost, and watch a live flame chart of its spans, events and logs.
+A performance inspector for Effect 4 programs. Add `Inspect.layer()` to your app
+to view its spans in a live flame chart with events and logs, or query a run from
+the command line.
 
 ![Effect inspector demo showing a live flame chart, virtualized event log, and selected span details](docs/images/inspector-demo.png)
 
-Your program dials out to a long-lived **collector**, and the **webapp** reads
-the trace back from it. The collector owns the history, so
-restarting your program does not lose the trace.
-
-The collector's history is in memory only, so restarting _the collector_ does
-drop every trace it was holding. Save the ones you want to keep — see
-[Saving and loading traces](#saving-and-loading-traces).
-
 ## Quickstart
 
-Install the package in an Effect project. The `effect-inspect` command runs on
-Node.js 22 or newer and does not require Bun. The library import works in a
-JavaScript runtime with a global `WebSocket` implementation.
+Install in your Effect 4 project. The CLI requires Node.js 22 or newer.
 
 ```bash
 npm install effect-inspect effect
 ```
 
-Start the collector and bundled webapp, then open the URL it prints:
+Start the collector, which receives traces from your app and serves the web UI:
 
 ```bash
 npx effect-inspect start
 # effect-inspect listening at http://localhost:34437
 ```
 
-Run your instrumented program in another terminal. The collector listens for
-programs at `ws://localhost:34437/`. Run `npx effect-inspect --help` for
-command help or `npx effect-inspect start --help` for start options.
-
-When working from this repository, install its dependencies with `bun install`
-and run an example:
-
-```bash
-bun run example:webapp
-```
-
-Its spans appear in the webapp within a second of being emitted. See
-[`examples/README.md`](examples/README.md) for the other five and what each one
-is worth looking at.
-
-## Instrumenting your own program
+Open that URL and leave the collector running. Add the layer to your program,
+then run it in another terminal:
 
 ```ts
 import { Effect } from 'effect'
@@ -58,11 +35,16 @@ const program = Effect.gen(function* () {
 Effect.runPromise(program.pipe(Effect.provide(Inspect.layer())))
 ```
 
-`Inspect.layer()` installs a tracer and a logger, so `Effect.withSpan`,
-`Effect.annotateCurrentSpan` and `Effect.log*` all reach the collector. The
-logger is merged with your existing ones, so console output is unchanged.
+Select the run in the UI to inspect its flame chart and event log. Selecting a
+span shows its attributes, events and failure details.
 
-Options, all optional:
+## Recording traces
+
+`Inspect.layer()` installs a tracer and adds a logger alongside your existing
+loggers. It records `Effect.withSpan`, `Effect.annotateCurrentSpan` and
+`Effect.log*` without changing your console logging.
+
+All layer options are optional:
 
 ```ts
 Inspect.layer({
@@ -73,50 +55,39 @@ Inspect.layer({
 })
 ```
 
+If the collector is unavailable, your program keeps running. The inspector
+reconnects in the background using the same session ID. When the outbound queue
+fills, it drops new messages and reports the gap as a warning in the trace.
+
 ### Choosing the session ID
 
-A launcher — you, a script, or a coding agent — can pick the session ID before
-starting an already instrumented program, so it can find that exact run later
-without searching the session list:
+Runs get a random UUID by default. Choose an ID when you want to find a specific
+run from a script or coding agent:
 
 ```bash
 EFFECT_INSPECT_SESSION_ID=checkout-before-1 bun my-program.ts
 ```
 
-The `sessionId` option wins over the variable; with neither, a random UUID is
-used only when the variable is absent. IDs are 1–128 ASCII letters, digits,
-`.`, `_` or `-`, starting with a letter or digit. An invalid ID — including a
-variable that is set but empty — is not replaced with another one: the program
-runs normally, records nothing, and logs a warning saying why. The same
-happens when the runtime has an environment it may not read: under Deno
-without env permission the layer checks the permission first (it never asks
-for it, so the program is not stopped at a prompt) and disables recording.
-Pass the `sessionId` option, or grant access with
-`--allow-env=EFFECT_INSPECT_SESSION_ID`, to record there. A runtime with no
-environment at all, such as a browser, just uses a random UUID. Setting the variable does not instrument a program by
-itself; it still needs `Inspect.layer()`.
+The `sessionId` layer option takes precedence over the environment variable.
+Use a fresh ID for each run, retry and instrumented child process. Reconnects
+keep the same ID, but a second run using an ID already held by the collector
+creates a conflict: the collector discards the second run's telemetry, keeps
+the original trace and records the collision in its `conflicts` count. CLI
+queries for that ID fail with `SessionConflict`.
 
-**Use one ID per run.** The ID is kept across reconnects, but a _different_
-run announcing an ID the collector already holds — even one whose run has
-ended — is refused as a collision: its telemetry is discarded, the original
-trace is left untouched, and the session records the refused connection in its
-`conflicts` count. Give reproduction attempts their own IDs, and remember that
-child processes inherit the variable: give each instrumented child a distinct
-value, or remove it from the child's environment (`env -u
-EFFECT_INSPECT_SESSION_ID …`, or delete the key from the `env` passed to
-`spawn`) — setting it to an empty string disables recording instead. IDs
-correlate runs; they are not authentication.
+IDs must contain 1 to 128 ASCII letters, digits, `.`, `_` or `-`, and start with
+a letter or digit. An invalid ID or an empty environment variable disables
+recording and logs a warning. Remove the variable to return to random IDs.
+Child processes inherit it, so give each instrumented child its own value or
+remove the variable from its environment.
 
-Collision refusal needs a collector from this release or later. It tells runs
-apart by a per-client instance ID that older clients do not send, so an older
-client is treated as one run per ID and reconnects as before. An older
-collector ignores the instance ID and merges runs that reuse an ID into one
-session.
+Under Deno, grant `--allow-env=EFFECT_INSPECT_SESSION_ID` or pass the `sessionId`
+option. If environment access is denied, the layer disables recording with a
+warning. Browsers and other runtimes without an environment use a random UUID.
 
 ## Querying runs from the command line
 
-Coding agents (and people) can query a run as JSON instead of opening the web
-UI. Pick the session ID before launch, then ask for exactly that run:
+Choose a session ID before launching your app, then use it to query that run:
 
 ```bash
 npx effect-inspect start                                   # terminal 1, leave running
@@ -129,43 +100,34 @@ npx effect-inspect export  --session checkout-fail-001 --out checkout-fail-001.e
 npx effect-inspect summary --file checkout-fail-001.eitrace --json   # no collector needed
 ```
 
-Live queries need `--session`; the newest session is never assumed, and an
-unknown or reused ID fails with its own error instead of answering for another
-run. Every command prints one JSON document on stdout (at most 1 MiB), a
-diagnostic on stderr on failure, and a distinct exit code per outcome. The
-collector address is `--url`, else `http://localhost:$EFFECT_INSPECT_PORT`,
-else port 34437. `npx effect-inspect --help` and `npx effect-inspect <command>
---help` are the full reference: flags, defaults, JSON fields, errors and what
-to try next. Durations are observed elapsed time, not CPU time or a slowness
-verdict.
+Start with `summary` for an overview, use `spans` to find failures or long-running
+spans, then inspect a span and its logs. Use `sessions` to list runs when you
+don't know their IDs.
+
+Queries use `--session` for a live collector or `--file` for a saved trace.
+Each command writes one JSON document to stdout, limited to 1 MiB, and writes
+failure diagnostics to stderr. Each outcome has a distinct exit code.
+`--json` produces compact output for scripts.
+
+The collector address comes from `--url`, then `EFFECT_INSPECT_PORT`, with
+`http://localhost:34437` as the default. Run `npx effect-inspect --help` or
+`npx effect-inspect <command> --help` for flags, output fields and error codes.
+Span durations measure elapsed time, not CPU usage.
 
 ## Saving and loading traces
 
-**save** in the header writes the selected session to a `.eitrace` file.
-**open** — or dropping a file anywhere on the page — reads one back. A loaded
-trace appears in the session list marked `file` and renders exactly like a live
-one: chart, event log, filter and detail panel all work, and **no collector
-needs to be running at all**.
+Click **save** in the UI header to download the selected session as a `.eitrace`
+file. Click **open** or drop a file onto the page to load it. Loaded traces appear
+in the session list marked `file`, with the same chart, filters and detail panels
+as live runs. You can also query saved files with the CLI's `--file` option.
 
-The file is the protocol message stream itself — one JSON line per message,
-with a small header carrying the session's clock — so a saved trace loses
-nothing the live view had, and saving a loaded trace again is lossless.
+The collector keeps traces in memory. Restarting your app leaves its previous
+runs available; stopping the collector clears them. Save or export any traces
+you want to keep before stopping it.
 
-This is also the answer to the collector's in-memory history: a trace you have
-saved survives a collector restart, a machine restart, and being emailed to
-someone else.
-
-**Adding the layer is safe anywhere.** If no collector is listening, the program
-runs exactly as it would have — no hang, no error, no delay. If the collector
-goes away mid-run the program keeps going and reconnects in the background,
-resuming the same session. If you outrun the socket, the buffer refuses the
-newest messages once it is full and reports the gap as a warning in the trace,
-rather than pushing backpressure into your fibers — so what you lose is the tail
-of a burst, never a span's start or end that already made it into the buffer.
-
-The one consequence: when the collector is down you get silence, not an error.
-The examples probe for it first and print a hint — worth copying if you hit
-this while demoing.
+A `.eitrace` file contains the recorded protocol messages as JSON lines and a
+header with the session's clock. Saved traces can be shared and inspected
+offline. Saving a loaded trace preserves its recorded data.
 
 ## Configuration
 
@@ -174,37 +136,50 @@ this while demoing.
 | `EFFECT_INSPECT_PORT`     | `34437`  | Port the collector listens on          |
 | `EFFECT_INSPECT_CAPACITY` | `200000` | Messages the collector retains per run |
 
-The collector serves both roles on one port, routed by path: programs dial
-`ws://localhost:34437/`, the webapp `ws://localhost:34437/webapp`.
+The collector serves the web UI and WebSocket connections on the same port.
+Programs connect to `ws://localhost:34437/`; the UI connects to
+`ws://localhost:34437/webapp`.
 
-The installed command uses Node.js for its WebSocket server and bundled UI. The
-library's `Inspect.layer()` uses the runtime's global `WebSocket`; use
-`Inspect.layerWebSocket()` with a supplied Effect WebSocket constructor when
-that global is unavailable.
+If you change the collector port, pass the matching `url` to `Inspect.layer()`.
+The layer does not read `EFFECT_INSPECT_PORT`.
+
+The layer uses the runtime's global `WebSocket`. If your runtime doesn't provide
+one, use `Inspect.layerWebSocket()` with an Effect WebSocket constructor.
 
 ## Development
 
-The frontend uses [Foldkit](https://foldkit.dev/) with Effect 4 and Vite.
-`app/src/main.ts` defines initialization and the pure Message/update state machine;
-`app/src/state/model.ts` defines the Schema-backed UI Model. Browser actions live
-in Commands, the collector connection in a scoped Subscription, and the canvas,
-observers and pointer listeners in scoped Mounts.
-
-Dense span data stays in `TraceStore`, outside the UI Model. The socket applies
-messages directly and publishes a sampled version once per animation frame.
-The event log is virtualized, and aggregation follows the chart's sampled time
-window. DevTools uses Inspect mode because the mutable trace resource does not
-support historical replay. Development reloads preserve UI preferences; loaded
-file data ends with the previous browser resource lifetime and must be reopened.
-
-Vite proxies `/webapp` to the local collector on port 34437. Set
-`VITE_COLLECTOR_URL` to inspect another collector. Production builds are static
-assets in `app/dist`, served by the installed CLI alongside the WebSocket API.
+Use Bun to work on the repository:
 
 ```bash
-bun run check         # format, lint, typecheck — must pass before a commit
-bun run check:write   # auto-fix what it can
-bun test src app      # unit tests
-bun run stub:collector  # fake collector, for working on the webapp alone
-bun run dev:app       # webapp dev server on http://localhost:34438
+bun install
+bun run collector    # collector on port 34437
+bun run dev:app      # UI at http://localhost:34438, in another terminal
+bun run example:webapp  # sample trace, in a third terminal
+```
+
+See [`examples/README.md`](examples/README.md) for programs covering concurrency,
+failures, deep traces and high message volumes.
+
+The frontend uses [Foldkit](https://foldkit.dev/), Effect 4 and Vite.
+`app/src/main.ts` defines initialization and updates, and
+`app/src/state/model.ts` defines the UI model. Browser actions live in Commands,
+the collector connection in a scoped Subscription, and canvas rendering and
+listeners in scoped Mounts.
+
+`TraceStore` holds span data outside the UI model. Socket messages update it
+directly; the UI samples changes once per animation frame. The event log is
+virtualized, and aggregation uses the chart's sampled time window. DevTools uses
+Inspect mode because the mutable trace store does not support historical replay.
+Reloads preserve UI preferences, but loaded trace files must be reopened.
+
+Vite proxies `/webapp` to the local collector on port 34437. Set
+`VITE_COLLECTOR_URL` to connect the development UI to another collector.
+`bun run build` compiles the CLI and builds the frontend into `app/dist`, which
+the installed CLI serves as static assets.
+
+```bash
+bun run check         # format, lint, typecheck; required before committing
+bun run check:write   # apply formatting and lint fixes
+bun test src app      # tests
+bun run stub:collector  # fake collector for frontend development
 ```
