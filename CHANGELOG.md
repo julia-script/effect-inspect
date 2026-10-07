@@ -1,5 +1,12 @@
 # effect-inspect
 
+## 0.3.2
+
+### Patch Changes
+
+- 41136e3: Use Effect 4 as a peer dependency so consumers can choose any compatible 4.x version. Keep Foldkit and the browser platform package as development dependencies for the bundled frontend to avoid imposing Foldkit's exact Effect version on consumers.
+- d947376: Replace the inspector frontend with Foldkit, preserving live traces, saved trace files, canvas navigation, and virtualized event logs. Serve the production inspector as static Vite assets.
+
 ## 0.3.1
 
 ### Patch Changes
