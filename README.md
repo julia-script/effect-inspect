@@ -15,8 +15,10 @@ drop every trace it was holding. Save the ones you want to keep — see
 
 ## Quickstart
 
-Install the package in an Effect project. The `effect-inspect` command runs on
-Node.js 22 or newer and does not require Bun. The library import works in a
+Install the package in an Effect 4 project. Effect is a peer dependency (`^4.0.0`),
+so the inspector uses your project's compatible Effect version. The
+`effect-inspect` command runs on Node.js 22 or newer and does not require Bun.
+The library import works in a
 JavaScript runtime with a global `WebSocket` implementation.
 
 ```bash
